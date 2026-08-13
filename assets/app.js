@@ -314,6 +314,15 @@ function selectedVersions() {
 function datasetsOf(version, scenarioId) {
   return version.datasets.filter((d) => !scenarioId || d.scenario === scenarioId);
 }
+/* Vereinigung der Datensätze über die ausgewählten Versionen: eine neue
+   Version kann Sub-Szenarien ergänzen, die es in der älteren nicht gab.     */
+function unionDatasets(versions, scenarioId) {
+  const seen = new Map();
+  versions.forEach((v) => datasetsOf(v, scenarioId).forEach((d) => {
+    if (!seen.has(d.dataset)) seen.set(d.dataset, d);
+  }));
+  return [...seen.values()];
+}
 /* Gewichtetes Mittel über Datensätze (Gewicht = Anzahl bewerteter Anrufe) */
 function pooled(datasets, metricKey) {
   let sum = 0, n = 0, used = 0;
@@ -332,6 +341,15 @@ function metricsIn(datasets) {
 }
 function decimalsForMetric(key) {
   return metricInfo(key).typ === 'regelbasiert' ? 1 : 0;
+}
+/* Ein einzelner Anruf hat bei Judge-Metriken die Bewertung 0 oder 1 – ein
+   Prozentwert wäre hier irreführend. Regelbasierte Metriken sind Anteile.   */
+function isBinaryMetric(key) {
+  return metricInfo(key).typ !== 'regelbasiert';
+}
+function fmtRunValue(key, v) {
+  if (v === null || v === undefined || Number.isNaN(v)) return '–';
+  return isBinaryMetric(key) ? fmtNum(v, 0) : fmtPct(v, 1);
 }
 function scenarioOf(id) { return SCENARIOS.find((s) => s.id === id); }
 
@@ -358,6 +376,7 @@ function renderAll() {
   renderScenarios();
   renderScenarioDetail();
   renderFooter();
+  flushDraws(); // erst jetzt hängt alles im Dokument und ist messbar
 }
 
 function renderFilterbar() {
@@ -485,7 +504,7 @@ function chartCard({ id, title, subtitle, build, buildTable, footnote }) {
     card.appendChild(f);
   }
   // Nach dem Einfügen zeichnen (Breite muss messbar sein)
-  requestAnimationFrame(() => {
+  scheduleDraw(body, () => {
     if (STATE.tables.has(id)) buildTable(body); else build(body);
   });
   return card;
@@ -537,8 +556,9 @@ function renderAggregate() {
   const hintFor = (k) => {
     const p = pooled(versions[0].datasets, k);
     const mi = metricInfo(k);
-    const scope = p ? `${p.datasets} von ${versions[0].datasets.length} Datensätzen · ${fmtInt(p.n)} Anrufe` : 'nicht erhoben';
-    return `${mi.typ} · ${DIRECTION_TEXT[mi.direction]}${mi.direction === 'ziel' ? ' ' + fmtPct(mi.target, 0) : ''} · ${scope}`;
+    const ziel = mi.direction === 'ziel' ? ' ' + fmtPct(mi.target, 0) : '';
+    const scope = p ? `${p.datasets}/${versions[0].datasets.length} Datensätze · ${fmtInt(p.n)} Anrufe` : 'nicht erhoben';
+    return `${DIRECTION_TEXT[mi.direction]}${ziel} · ${scope}`;
   };
 
   box.appendChild(chartCard({
@@ -592,6 +612,9 @@ function renderScenarios() {
 
   const grid = document.createElement('div');
   grid.className = 'scenario-grid';
+  // Ab drei Versionen brauchen die Wertespalten so viel Platz, dass zwei
+  // Karten nebeneinander die Beschriftungen abschneiden würden
+  if (versions.length > 2) grid.style.gridTemplateColumns = '1fr';
 
   SCENARIOS.forEach((sc) => {
     const dsAll = versions.flatMap((v) => datasetsOf(v, sc.id));
@@ -613,9 +636,9 @@ function renderScenarios() {
     h.textContent = sc.name;
     wrapT.appendChild(h);
     const p = document.createElement('p');
-    const nCalls = versions.map((v) => datasetsOf(v, sc.id).reduce((a, d) => a + d.runCount, 0));
-    const nSub = datasetsOf(versions[0], sc.id).length;
-    p.textContent = `${sc.kurz} — ${nSub} ${nSub === 1 ? 'Sub-Szenario' : 'Sub-Szenarien'}, ${fmtInt(nCalls[0])} Anrufe je Version`;
+    const nCalls = datasetsOf(versions[0], sc.id).reduce((a, d) => a + d.runCount, 0);
+    const nSub = unionDatasets(versions, sc.id).length;
+    p.textContent = `${sc.kurz} — ${nSub} ${nSub === 1 ? 'Sub-Szenario' : 'Sub-Szenarien'}, ${fmtInt(nCalls)} Anrufe je Version`;
     wrapT.appendChild(p);
     head.appendChild(wrapT);
     const open = document.createElement('span');
@@ -649,9 +672,12 @@ function renderScenarios() {
     const hintFor = (k) => {
       const pp = pooled(datasetsOf(versions[0], sc.id), k);
       const mi = metricInfo(k);
-      return `${DIRECTION_TEXT[mi.direction]}${mi.direction === 'ziel' ? ' ' + fmtPct(mi.target, 0) : ''}${pp ? ` · ${pp.datasets} von ${nSub} Sub-Szenarien` : ''}`;
+      const ziel = mi.direction === 'ziel' ? ' ' + fmtPct(mi.target, 0) : '';
+      // Umfang nur nennen, wenn die Metrik nicht in allen Sub-Szenarien erhoben wurde
+      const scope = pp && pp.datasets < nSub ? ` · nur ${pp.datasets} von ${nSub} Sub-Szenarien` : '';
+      return `${DIRECTION_TEXT[mi.direction]}${ziel}${scope} · ${mi.typ}`;
     };
-    requestAnimationFrame(() => {
+    scheduleDraw(body, () => {
       dotPlot(body, {
         rows: metricRows(keys, valueFor, hintFor),
         versions: versionLegend(),
@@ -679,8 +705,7 @@ function renderScenarioDetail() {
   if (!sc) return;
   const versions = selectedVersions();
   if (!versions.length) return;
-  const primary = versions[0];
-  const subs = datasetsOf(primary, sc.id);
+  const subs = unionDatasets(versions, sc.id);
   const keys = metricsIn(versions.flatMap((v) => datasetsOf(v, sc.id)));
 
   const panel = document.createElement('div');
@@ -768,6 +793,7 @@ function renderScenarioDetail() {
 
   const grid = document.createElement('div');
   grid.className = 'metric-grid';
+  if (versions.length > 2) grid.style.gridTemplateColumns = '1fr';
   keys.forEach((k) => grid.appendChild(metricPanel(sc, k, versions)));
   body.appendChild(grid);
 
@@ -816,7 +842,7 @@ function metricPanel(sc, metricKey, versions) {
   body.className = 'mp-body';
   panel.appendChild(body);
 
-  const rows = datasetsOf(versions[0], sc.id).map((d0) => {
+  const rows = unionDatasets(versions, sc.id).map((d0) => {
     const points = versions.map((v) => {
       const d = v.datasets.find((x) => x.dataset === d0.dataset);
       const s = d && d.scores[metricKey];
@@ -833,7 +859,7 @@ function metricPanel(sc, metricKey, versions) {
       points,
     };
   });
-  requestAnimationFrame(() => {
+  scheduleDraw(body, () => {
     dotPlot(body, {
       rows,
       versions: versions.map((v) => ({ id: v.id, color: versionColor(v.id) })),
@@ -927,6 +953,7 @@ function metricDetail(sc, metricKey, versions) {
     .then(() => {
       renderDistribution(distBox, needed, metricKey, versions);
       renderExamples(exBox, sc, needed, metricKey);
+      flushDraws();
     })
     .catch((e) => {
       distBox.textContent = '';
@@ -1013,7 +1040,7 @@ function renderDistribution(box, datasets, metricKey, versions) {
       const hbox = document.createElement('div');
       card.appendChild(hbox);
       grid.appendChild(card);
-      requestAnimationFrame(() => {
+      scheduleDraw(hbox, () => {
         histogram(hbox, {
           values: vals, color: versionColor(d.version), bins: 12,
           domain: [0, domainMax],
@@ -1025,26 +1052,42 @@ function renderDistribution(box, datasets, metricKey, versions) {
     box.appendChild(grid);
   }
 
-  /* Statistiktabelle (Tabellen-Zwilling der Verteilung) */
+  /* Statistiktabelle (Tabellen-Zwilling der Verteilung).
+     Bei binären Bewertungen sind Median, Streuung und Extremwerte ohne
+     Aussagekraft – dort werden Auszählungen gezeigt.                        */
   const h = document.createElement('h5');
-  h.textContent = 'Kennzahlen der Verteilung';
+  h.textContent = binaer ? 'Auszählung je Sub-Szenario' : 'Kennzahlen der Verteilung';
   box.appendChild(h);
   const tblBox = document.createElement('div');
-  const dec = decimalsForMetric(metricKey);
-  renderTable(tblBox, {
-    columns: [{ label: 'Sub-Szenario' }, { label: 'Version' }, { label: 'Anrufe' }, { label: 'Mittelwert' },
-      { label: 'Median' }, { label: 'Std.abw.' }, { label: 'Minimum' }, { label: 'Maximum' }],
-    rows: usable.map((d) => {
-      const vals = d.runs.map((r) => r.feedback[metricKey]).filter((x) => x !== null && x !== undefined);
-      const st = stats(vals);
-      return {
-        cells: [d.info.name, d.version, fmtInt(st.n), fmtPct(st.mean, Math.max(dec, 1)),
-          fmtPct(st.median, Math.max(dec, 1)), fmtPct(st.sd, Math.max(dec, 1)),
-          fmtPct(st.min, Math.max(dec, 1)), fmtPct(st.max, Math.max(dec, 1))],
-      };
-    }),
-    caption: 'Kennzahlen der Verteilung je Sub-Szenario',
-  });
+  if (binaer) {
+    renderTable(tblBox, {
+      columns: [{ label: 'Sub-Szenario' }, { label: 'Version' }, { label: 'Anrufe' },
+        { label: 'Bewertung 1' }, { label: 'Bewertung 0' }, { label: 'Anteil' }],
+      rows: usable.map((d) => {
+        const vals = d.runs.map((r) => r.feedback[metricKey]).filter((x) => x !== null && x !== undefined);
+        const ones = vals.filter((x) => x === 1).length;
+        return {
+          cells: [d.info.name, d.version, fmtInt(vals.length), fmtInt(ones), fmtInt(vals.length - ones),
+            fmtPct(vals.length ? ones / vals.length : null, 0)],
+        };
+      }),
+      caption: 'Auszählung der Bewertungen je Sub-Szenario',
+    });
+  } else {
+    renderTable(tblBox, {
+      columns: [{ label: 'Sub-Szenario' }, { label: 'Version' }, { label: 'Anrufe' }, { label: 'Mittelwert' },
+        { label: 'Median' }, { label: 'Std.abw.' }, { label: 'Minimum' }, { label: 'Maximum' }],
+      rows: usable.map((d) => {
+        const vals = d.runs.map((r) => r.feedback[metricKey]).filter((x) => x !== null && x !== undefined);
+        const st = stats(vals);
+        return {
+          cells: [d.info.name, d.version, fmtInt(st.n), fmtPct(st.mean, 1),
+            fmtPct(st.median, 1), fmtPct(st.sd, 1), fmtPct(st.min, 1), fmtPct(st.max, 1)],
+        };
+      }),
+      caption: 'Kennzahlen der Verteilung je Sub-Szenario',
+    });
+  }
   box.appendChild(tblBox);
 }
 
@@ -1097,11 +1140,15 @@ function renderExamples(box, sc, datasets, metricKey) {
     .sort((a, b) => a.v - b.v);
   if (!scored.length) return;
   const lowest = scored[0], highest = scored[scored.length - 1];
-  const picks = lowest.r === highest.r ? [lowest] : [lowest, highest];
+  const picks = lowest.r === highest.r || lowest.v === highest.v ? [lowest] : [lowest, highest];
+  const binaer = isBinaryMetric(metricKey);
+  const tagFor = (idx) => picks.length === 1 ? (binaer ? `alle Anrufe mit Bewertung ${fmtNum(picks[0].v, 0)}` : 'Beispielanruf')
+    : binaer ? (idx === 0 ? 'Bewertung 0' : 'Bewertung 1')
+      : (idx === 0 ? 'Niedrigster Wert' : 'Höchster Wert');
 
   const grid = document.createElement('div');
   grid.className = 'transcript-grid';
-  picks.forEach((p, idx) => grid.appendChild(transcriptCard(p, metricKey, ds, picks.length === 1 ? '' : idx === 0 ? 'Niedrigster Wert' : 'Höchster Wert')));
+  picks.forEach((p, idx) => grid.appendChild(transcriptCard(p, metricKey, ds, tagFor(idx))));
   box.appendChild(grid);
 }
 
@@ -1112,7 +1159,7 @@ function transcriptCard(pick, metricKey, ds, tag) {
   head.className = 't-head';
   const score = document.createElement('div');
   score.className = 't-score';
-  score.textContent = `${tag ? tag + ' · ' : ''}${metricInfo(metricKey).short}: ${fmtPct(pick.v, decimalsForMetric(metricKey))}`;
+  score.textContent = `${metricInfo(metricKey).short}: ${fmtRunValue(metricKey, pick.v)}${tag ? ' · ' + tag : ''}`;
   head.appendChild(score);
   const vars = document.createElement('div');
   vars.className = 't-vars';
@@ -1129,7 +1176,8 @@ function transcriptCard(pick, metricKey, ds, tag) {
   meta.style.color = 'var(--ink-3)';
   const others = Object.keys(pick.r.feedback)
     .filter((k) => k !== metricKey && pick.r.feedback[k] !== null)
-    .map((k) => `${metricInfo(k).short} ${fmtPct(pick.r.feedback[k], decimalsForMetric(k))}`);
+    .sort((a, b) => (metricInfo(a).order || 999) - (metricInfo(b).order || 999))
+    .map((k) => `${metricInfo(k).short} ${fmtRunValue(k, pick.r.feedback[k])}`);
   meta.textContent = [`Dauer ${fmtNum(pick.r.executionTime, 1)} s`, ...others].join(' · ');
   head.appendChild(meta);
   card.appendChild(head);
@@ -1165,7 +1213,7 @@ function transcriptCard(pick, metricKey, ds, tag) {
 }
 
 /* --- Fehleranzeige ----------------------------------------------------- */
-function errorBox(title, detail) {
+function errorBox(title, detail, withRetry) {
   const d = document.createElement('div');
   d.className = 'state error';
   const s = document.createElement('strong');
@@ -1176,6 +1224,34 @@ function errorBox(title, detail) {
     c.textContent = detail;
     d.appendChild(c);
   }
+  if (withRetry) {
+    const row = document.createElement('div');
+    row.style.marginTop = '12px';
+    const b = document.createElement('button');
+    b.className = 'tbtn';
+    b.type = 'button';
+    b.textContent = 'Erneut versuchen';
+    b.addEventListener('click', () => {
+      textCache.clear();
+      d.replaceWith(loadingBox('Ergebnisdaten werden erneut geladen …'));
+      init();
+    });
+    row.appendChild(b);
+    d.appendChild(row);
+  }
+  return d;
+}
+
+function loadingBox(text) {
+  const d = document.createElement('div');
+  d.className = 'state';
+  const w = document.createElement('span');
+  w.className = 'loading';
+  const sp = document.createElement('span');
+  sp.className = 'spinner';
+  w.appendChild(sp);
+  w.appendChild(document.createTextNode(text));
+  d.appendChild(w);
   return d;
 }
 
@@ -1233,10 +1309,10 @@ function renderFooter() {
    6 — Start
    ========================================================================== */
 function fatal(err) {
-  const main = $('#main');
-  main.textContent = '';
   let title = 'Die Daten konnten nicht geladen werden.';
-  let detail = err.message;
+  let detail = `${err.message} — versucht wurden manifest.json und die GitHub-Contents-API `
+    + `im Repository ${CONFIG.owner}/${CONFIG.repo} (Branch ${CONFIG.branch}). `
+    + 'Bei „Failed to fetch“ ist meist die Netzverbindung oder ein Firewall-/Proxy-Filter die Ursache.';
   if (err.message === 'RATE_LIMIT') {
     title = 'GitHub-Zugriffslimit erreicht.';
     detail = 'Die GitHub-API erlaubt ohne Anmeldung 60 Anfragen pro Stunde und IP-Adresse. Bitte in einigen Minuten erneut laden.';
@@ -1247,7 +1323,12 @@ function fatal(err) {
     title = 'Repository oder Ordner nicht gefunden.';
     detail = `Nicht gefunden: ${err.message.split(':')[1]} in ${CONFIG.owner}/${CONFIG.repo}. Ist das Repository öffentlich?`;
   }
-  main.appendChild(errorBox(title, detail));
+  // Grundgerüst stehen lassen, damit „Erneut versuchen“ funktioniert
+  $('#main').dataset.ready = 'false';
+  $('#kpis').textContent = '';
+  const box = $('#warnings');
+  box.textContent = '';
+  box.appendChild(errorBox(title, detail, true));
 }
 
 async function init() {
@@ -1257,8 +1338,10 @@ async function init() {
     await loadIndex();
     const usable = DATA.versions.filter((v) => !v.error && v.datasets.length);
     if (!usable.length) throw new Error(DATA.versions[0] && DATA.versions[0].error ? DATA.versions[0].error : 'NO_VERSIONS');
+    // Voreinstellung: die neueste Version ist ausgewählt
     STATE.selected = new Set([usable[usable.length - 1].id]);
     main.dataset.ready = 'true';
+    $('#warnings').textContent = '';
     renderAll();
     const errs = DATA.versions.filter((v) => v.error);
     if (errs.length) {
@@ -1270,10 +1353,6 @@ async function init() {
   }
 }
 
-let rt = null;
-window.addEventListener('resize', () => {
-  clearTimeout(rt);
-  rt = setTimeout(() => { if ($('#main').dataset.ready === 'true') renderAll(); }, 200);
-});
-
+/* Diagramme zeichnen sich über ihren ResizeObserver selbst neu – ein
+   Resize-Listener auf dem Fenster ist dafür nicht nötig. */
 document.addEventListener('DOMContentLoaded', init);

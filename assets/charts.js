@@ -34,6 +34,53 @@ function fmtInt(v) {
   return new Intl.NumberFormat('de-DE').format(Math.round(v));
 }
 
+/* --- Zeichen-Warteschlange ----------------------------------------------
+   Diagramme brauchen ihre gemessene Containerbreite, dürfen also erst
+   gezeichnet werden, wenn der Container im Dokument hängt. Bewusst KEIN
+   requestAnimationFrame: in einem Hintergrund-Tab feuert rAF nicht, die
+   Diagramme blieben dann leer. Stattdessen wird nach dem Aufbau des DOM
+   synchron gezeichnet; Container ohne Breite werden per ResizeObserver
+   nachgezogen.                                                             */
+const MIN_DRAW_WIDTH = 80;   // darunter ist der Container noch nicht ausgelegt
+const REDRAW_DELTA = 8;      // erst ab dieser Breitenänderung neu zeichnen
+const PENDING_DRAWS = [];
+
+function scheduleDraw(container, fn) {
+  PENDING_DRAWS.push([container, fn]);
+}
+
+function flushDraws() {
+  const jobs = PENDING_DRAWS.splice(0, PENDING_DRAWS.length);
+  jobs.forEach(([container, fn]) => {
+    if (!container.isConnected) return;
+    let drawnAt = -1;
+    let ro = null;
+    const attempt = () => {
+      if (!container.isConnected) { if (ro) ro.disconnect(); return; }
+      const w = innerWidth(container, 0);
+      if (w < MIN_DRAW_WIDTH) return;                  // noch keine echte Breite
+      if (Math.abs(w - drawnAt) < REDRAW_DELTA) return; // praktisch unverändert
+      drawnAt = w;
+      fn(container);
+    };
+    // Der Beobachter deckt alles ab: verstecktes Fenster, später aufgeklappte
+    // Container und Größenänderungen des Browserfensters.
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(attempt);
+      ro.observe(container);
+    }
+    attempt();
+  });
+}
+
+/* Innenbreite eines Containers (ohne Padding) — clientWidth enthält Padding
+   und würde das SVG über den Rand hinauslaufen lassen.                     */
+function innerWidth(container, min = 260) {
+  const cs = getComputedStyle(container);
+  const w = container.clientWidth - parseFloat(cs.paddingLeft || 0) - parseFloat(cs.paddingRight || 0);
+  return Math.max(min, Math.round(w || min));
+}
+
 /* --- Textmessung für Umbruch und Kürzung ------------------------------- */
 let _ctx = null;
 function measure(text, font) {
@@ -63,6 +110,21 @@ function wrapLines(text, maxW, font, maxLines) {
     }
   }
   return lines;
+}
+
+/* Hinweiszeile platzsparend einpassen: erst hintere „·“-Segmente weglassen,
+   erst danach kürzen. So bleibt die wichtigste Angabe (Zielrichtung) stehen. */
+function fitHint(text, maxW, font) {
+  if (!text) return '';
+  if (measure(text, font) <= maxW) return text;
+  const parts = String(text).split(' · ');
+  for (let k = parts.length - 1; k >= 1; k--) {
+    const t = parts.slice(0, k).join(' · ');
+    if (measure(t, font) <= maxW) return t;
+  }
+  let t = parts[0];
+  while (t.length > 1 && measure(t + '…', font) > maxW) t = t.slice(0, -1);
+  return t.replace(/[\s,;:.]+$/, '') + '…';
 }
 
 /* --- Tooltip ----------------------------------------------------------- */
@@ -155,9 +217,8 @@ function dotPlot(container, spec) {
     axisLabel = 'Anteil der Anrufe',
   } = spec;
   container.textContent = '';
-  const W = Math.max(320, container.clientWidth || 640);
+  const W = innerWidth(container, 300);
 
-  const FONT_LABEL = '600 13px var(--sans, system-ui)';
   const FONT_LABEL_M = '600 13px system-ui, -apple-system, Helvetica, Arial, sans-serif';
   const FONT_HINT_M = '400 11px system-ui, -apple-system, Helvetica, Arial, sans-serif';
 
@@ -192,7 +253,7 @@ function dotPlot(container, spec) {
   const H = y + axisH;
 
   const svg = el('svg', {
-    viewBox: `0 0 ${W} ${H}`, width: W, height: H,
+    viewBox: `0 0 ${W} ${H}`, width: W, height: H, class: 'viz',
     role: 'img', 'aria-label': spec.ariaLabel || 'Punktdiagramm',
   });
   const sx = (v) => x0 + Math.max(0, Math.min(1, v)) * plotW;
@@ -258,7 +319,7 @@ function dotPlot(container, spec) {
       svg.appendChild(el('text', {
         x: 0, y: L.y + 14 + L.lines.length * 16 + 1, fill: C.ink3, 'font-size': 11,
         'font-family': 'inherit',
-      }, wrapLines(row.hint, labelW - 8, FONT_HINT_M, 1)[0] || ''));
+      }, fitHint(row.hint, labelW - 8, FONT_HINT_M)));
     }
     const full = el('title', {}, row.label + (row.hint ? ' — ' + row.hint : ''));
     svg.appendChild(full);
@@ -338,7 +399,7 @@ function waffle(container, { n, ones, color, cols = 10 }) {
   const rowsN = Math.ceil(dots / cols);
   const W = cols * step, H = rowsN * step;
   const svg = el('svg', {
-    viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: 'img',
+    viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: 'img', class: 'viz',
     'aria-label': `${fmtInt(ones)} von ${fmtInt(total)} Anrufen erfüllt`,
   });
   for (let i = 0; i < dots; i++) {
@@ -357,7 +418,7 @@ function waffle(container, { n, ones, color, cols = 10 }) {
    ========================================================================== */
 function histogram(container, { values, color, bins = 12, domain = [0, 1], target = null, label = '' }) {
   container.textContent = '';
-  const W = Math.max(240, container.clientWidth || 300);
+  const W = innerWidth(container, 240);
   const H = 168, padL = 30, padR = 10, padT = 12, padB = 40;
   const [d0, d1] = domain;
   const counts = new Array(bins).fill(0);
@@ -367,12 +428,15 @@ function histogram(container, { values, color, bins = 12, domain = [0, 1], targe
     if (k < 0) k = 0;
     counts[k]++;
   });
-  const maxC = Math.max(1, ...counts);
+  // y-Achse auf runde Werte bringen (Ticks sollen glatt sein)
+  const rawMax = Math.max(1, ...counts);
+  const step = rawMax <= 10 ? 2 : rawMax <= 30 ? 5 : rawMax <= 60 ? 10 : 20;
+  const maxC = Math.ceil(rawMax / step) * step;
   const plotW = W - padL - padR, plotH = H - padT - padB;
-  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: 'img', 'aria-label': label });
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, width: W, height: H, class: 'viz', role: 'img', 'aria-label': label });
 
   // y-Raster
-  const ticks = [0, Math.ceil(maxC / 2), maxC];
+  const ticks = [0, maxC / 2, maxC];
   [...new Set(ticks)].forEach((t) => {
     const yy = padT + plotH - (t / maxC) * plotH;
     svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: yy, y2: yy, stroke: t === 0 ? C.line2 : C.line, 'stroke-width': 1 }));
