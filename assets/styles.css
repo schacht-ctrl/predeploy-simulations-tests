@@ -473,7 +473,15 @@ footer.site code { font-family: var(--mono); font-size: 11.5px; }
   .masthead h1 { font-size: 20px; }
   .filterbar { top: 0; position: static; }
   .masthead { position: static; }
-  .scenario-grid, .metric-grid { grid-template-columns: 1fr; }
+  .scenario-grid, .metric-grid, .intro-grid { grid-template-columns: 1fr; }
+  /* Kopfzeilen stapeln, damit der Text nicht von den Schaltflächen
+     zusammengedrückt wird */
+  .card-head, .mp-head { flex-direction: column; align-items: stretch; }
+  .toggle-row { margin-left: 0; }
+  .sc-open, .mp-open { margin-left: 0; align-self: flex-start; }
+  .detail-body, .detail-head { padding-left: 14px; padding-right: 14px; }
+  .card-body { padding-left: 14px; padding-right: 14px; }
+  .metric-detail { padding-left: 12px; padding-right: 12px; }
 }
 
 @media print {
