@@ -1,0 +1,1279 @@
+/* ==========================================================================
+   app.js — Datenladen, Zustand und Rendering des Dashboards
+   Die Ergebnisdaten werden zur Laufzeit aus dem GitHub-Repository gelesen.
+   Versionen ergeben sich ausschliesslich aus der Ordnerstruktur.
+   ========================================================================== */
+
+const CONFIG = {
+  owner: 'schacht-ctrl',
+  repo: 'predeploy-simulations-tests',
+  branch: 'main',
+  // Jeder Ordner im Repo-Root, der hierauf passt, ist eine Agenten-Version
+  versionPattern: /^[Vv]\d+/,
+};
+
+const GH_API = `https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}/contents`;
+const GH_RAW = `https://raw.githubusercontent.com/${CONFIG.owner}/${CONFIG.repo}/${CONFIG.branch}`;
+const REPO_URL = `https://github.com/${CONFIG.owner}/${CONFIG.repo}`;
+
+/* ==========================================================================
+   1 — Parser
+   ========================================================================== */
+
+/* CSV nach RFC 4180 (Trennzeichen Komma, Anführungszeichen verdoppelt) */
+function parseCSV(text) {
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  const rows = [];
+  let row = [], field = '', i = 0, inQ = false;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+        inQ = false; i++; continue;
+      }
+      field += c; i++; continue;
+    }
+    if (c === '"') { inQ = true; i++; continue; }
+    if (c === ',') { row.push(field); field = ''; i++; continue; }
+    if (c === '\r') { i++; continue; }
+    if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; i++; continue; }
+    field += c; i++;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function csvToObjects(text) {
+  const rows = parseCSV(text).filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ''));
+  if (!rows.length) return [];
+  const head = rows[0].map((h) => h.trim());
+  return rows.slice(1).map((r) => {
+    const o = {};
+    head.forEach((h, i) => { o[h] = r[i] !== undefined ? r[i] : ''; });
+    return o;
+  });
+}
+
+/* Trajektorien liegen als Python-Literal vor (einfache Anführungszeichen).
+   Getesteter Tokenizer: Werte enden an einem Anführungszeichen, dem
+   (nach Whitespace) ein Komma oder eine schliessende Klammer folgt.        */
+const ESCAPES = { n: '\n', t: '\t', r: '\r', '\\': '\\', "'": "'", '"': '"' };
+function unescapePy(v) {
+  if (v.indexOf('\\') === -1) return v;
+  let out = '', i = 0;
+  while (i < v.length) {
+    if (v[i] === '\\' && ESCAPES[v[i + 1]] !== undefined) { out += ESCAPES[v[i + 1]]; i += 2; }
+    else { out += v[i]; i++; }
+  }
+  return out;
+}
+function parseTrajectory(s) {
+  if (!s) return [];
+  const out = [];
+  let i = 0;
+  const n = s.length;
+  const ws = () => { while (i < n && (s[i] === ' ' || s[i] === '\n' || s[i] === '\t')) i++; };
+  ws();
+  if (s[i] !== '[') return [];
+  i++;
+  while (i < n) {
+    ws();
+    if (s[i] === ']') break;
+    if (s[i] !== '{') break;
+    i++;
+    const obj = {};
+    while (i < n) {
+      ws();
+      if (s[i] === '}') { i++; break; }
+      if (s[i] !== "'") return out;
+      let j = s.indexOf("'", i + 1);
+      if (j < 0) return out;
+      const key = s.slice(i + 1, j);
+      i = j + 1;
+      ws();
+      if (s[i] === ':') i++;
+      ws();
+      if (s[i] !== "'") { // unerwarteter Werttyp: bis Komma/Klammer überspringen
+        while (i < n && s[i] !== ',' && s[i] !== '}') i++;
+        if (s[i] === ',') i++;
+        continue;
+      }
+      let k = i + 1;
+      for (;;) {
+        k = s.indexOf("'", k);
+        if (k < 0) return out;
+        if (s[k - 1] === '\\') { k++; continue; }
+        let m = k + 1;
+        while (m < n && (s[m] === ' ' || s[m] === '\n' || s[m] === '\t')) m++;
+        if (m < n && (s[m] === ',' || s[m] === '}')) break;
+        k++;
+      }
+      obj[key] = unescapePy(s.slice(i + 1, k));
+      i = k + 1;
+      ws();
+      if (s[i] === ',') i++;
+    }
+    out.push(obj);
+    ws();
+    if (s[i] === ',') i++;
+  }
+  return out;
+}
+
+/* "0 days 00:00:37.914000" → Sekunden */
+function parseDuration(v) {
+  if (!v) return null;
+  const m = /(?:(\d+)\s*days?\s*)?(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(v);
+  if (!m) { const f = parseFloat(v); return Number.isNaN(f) ? null : f; }
+  return (+(m[1] || 0)) * 86400 + (+m[2]) * 3600 + (+m[3]) * 60 + parseFloat(m[4]);
+}
+function num(v) {
+  if (v === '' || v === null || v === undefined) return null;
+  const f = parseFloat(v);
+  return Number.isNaN(f) ? null : f;
+}
+
+/* ==========================================================================
+   2 — Laden aus GitHub
+   ========================================================================== */
+async function ghList(path = '') {
+  const url = `${GH_API}/${path}?ref=${CONFIG.branch}`;
+  const res = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/vnd.github+json' } });
+  if (res.status === 403 || res.status === 429) {
+    throw new Error('RATE_LIMIT');
+  }
+  if (res.status === 404) throw new Error(`NOT_FOUND:${path || '/'}`);
+  if (!res.ok) throw new Error(`GITHUB_${res.status}`);
+  return res.json();
+}
+
+const textCache = new Map();
+async function fetchCSV(file) {
+  const key = file.sha || file.path;
+  if (textCache.has(key)) return textCache.get(key);
+  // Cache-Buster über den Blob-SHA: neuer Inhalt ⇒ neue URL ⇒ sofort aktuell
+  const url = `${file.url}?v=${encodeURIComponent(file.sha || Date.now())}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`DOWNLOAD_${res.status}`);
+  const txt = await res.text();
+  textCache.set(key, txt);
+  return txt;
+}
+
+const DATA = { versions: [], byVersion: new Map(), source: null, generated: null };
+
+/* Bevorzugt: manifest.json aus dem Repo (kein API-Limit, funktioniert auch
+   dort, wo api.github.com blockiert ist). Fallback: Contents-API.          */
+async function loadManifestIndex() {
+  const res = await fetch(`${GH_RAW}/manifest.json?t=${Date.now()}`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`MANIFEST_${res.status}`);
+  const m = await res.json();
+  if (!m || !Array.isArray(m.versions) || !m.versions.length) throw new Error('MANIFEST_EMPTY');
+  DATA.generated = m.generated || null;
+  return m.versions.map((v) => {
+    const files = (v.files || []).map((f) => ({
+      name: f.name, path: f.path, sha: f.sha, url: `${GH_RAW}/${f.path.split('/').map(encodeURIComponent).join('/')}`,
+    }));
+    return {
+      id: (v.id || v.folder || '').toUpperCase(),
+      folder: v.folder || v.id,
+      summary: files.find((f) => /summary/i.test(f.name)),
+      runsFiles: files.filter((f) => /runs/i.test(f.name)),
+      datasets: [],
+    };
+  });
+}
+
+async function loadApiIndex() {
+  const root = await ghList('');
+  const dirs = root
+    .filter((e) => e.type === 'dir' && CONFIG.versionPattern.test(e.name))
+    .sort((a, b) => {
+      const na = parseInt(/\d+/.exec(a.name)[0], 10), nb = parseInt(/\d+/.exec(b.name)[0], 10);
+      return na - nb || a.name.localeCompare(b.name, 'de');
+    });
+  if (!dirs.length) throw new Error('NO_VERSIONS');
+  const versions = [];
+  for (const dir of dirs) {
+    const files = (await ghList(dir.name))
+      .filter((f) => f.type === 'file' && /\.csv$/i.test(f.name))
+      .map((f) => ({ name: f.name, path: f.path, sha: f.sha, url: f.download_url }));
+    versions.push({
+      id: dir.name.toUpperCase(), folder: dir.name,
+      summary: files.find((f) => /summary/i.test(f.name)),
+      runsFiles: files.filter((f) => /runs/i.test(f.name)),
+      datasets: [],
+    });
+  }
+  return versions;
+}
+
+async function loadIndex() {
+  let versions;
+  try {
+    versions = await loadManifestIndex();
+    DATA.source = 'manifest';
+  } catch (e) {
+    versions = await loadApiIndex();
+    DATA.source = 'api';
+  }
+  const seen = new Set();
+  versions = versions.filter((v) => v.id && !seen.has(v.id) && seen.add(v.id));
+  versions.sort((a, b) => {
+    const na = parseInt((/\d+/.exec(a.id) || [1e6])[0], 10);
+    const nb = parseInt((/\d+/.exec(b.id) || [1e6])[0], 10);
+    return na - nb || a.id.localeCompare(b.id, 'de');
+  });
+  if (!versions.length) throw new Error('NO_VERSIONS');
+  DATA.versions = versions;
+
+  for (const v of versions) {
+    if (!v.summary) { v.error = `Im Ordner „${v.folder}“ liegt keine Summary-Datei (Dateiname muss „summary“ enthalten).`; continue; }
+    try {
+      const rows = csvToObjects(await fetchCSV(v.summary));
+      v.datasets = rows.filter((r) => r.dataset).map((r) => buildDataset(r, v));
+    } catch (e) {
+      v.error = `Die Summary-Datei in „${v.folder}“ konnte nicht gelesen werden (${e.message}).`;
+    }
+  }
+  DATA.byVersion = new Map(versions.map((v) => [v.id, v]));
+}
+
+function buildDataset(row, version) {
+  const scores = {};
+  Object.keys(row).forEach((k) => {
+    const m = /^score\.(.+)\.(avg|n)$/.exec(k);
+    if (!m) return;
+    const key = m[1];
+    scores[key] = scores[key] || { avg: null, n: null };
+    scores[key][m[2]] = num(row[k]);
+  });
+  Object.keys(scores).forEach((k) => {
+    if (scores[k].avg === null) delete scores[k];
+  });
+  const info = datasetInfo(row.dataset);
+  const runsFile = version.runsFiles.find((f) => row.experiment && f.name.indexOf(row.experiment) !== -1);
+  return {
+    version: version.id,
+    key: version.id + '::' + row.dataset,
+    dataset: row.dataset,
+    experiment: row.experiment || '',
+    experimentId: row.experiment_id || '',
+    startTime: row.start_time || '',
+    runCount: num(row.run_count) || 0,
+    errorRate: num(row.error_rate),
+    latencyP50: parseDuration(row.latency_p50),
+    latencyP99: parseDuration(row.latency_p99),
+    tokens: num(row.total_tokens),
+    cost: num(row.total_cost),
+    datasetVersion: row.dataset_version || '',
+    scores,
+    info,
+    scenario: info.scenario,
+    runsFile,
+    runs: null,
+  };
+}
+
+/* Runs-Datei eines Datensatzes nachladen (nur bei Bedarf) */
+async function loadRuns(ds) {
+  if (ds.runs) return ds.runs;
+  if (!ds.runsFile) throw new Error(`Für „${ds.info.name}“ (${ds.version}) liegt keine Runs-Datei im Repository.`);
+  const rows = csvToObjects(await fetchCSV(ds.runsFile));
+  ds.runs = rows.map((r) => {
+    const feedback = {};
+    Object.keys(r).forEach((k) => {
+      const m = /^feedback\.(.+)$/.exec(k);
+      if (m) feedback[m[1]] = num(r[k]);
+    });
+    const inputs = {};
+    Object.keys(r).forEach((k) => {
+      const m = /^input\.(.+)$/.exec(k);
+      if (m) inputs[m[1]] = r[k];
+    });
+    return {
+      id: r.id || '',
+      inputs,
+      feedback,
+      executionTime: num(r.execution_time),
+      error: r.error || '',
+      trajectoryRaw: r['outputs.trajectory'] || '',
+    };
+  });
+  return ds.runs;
+}
+
+/* ==========================================================================
+   3 — Auswertung
+   ========================================================================== */
+function selectedVersions() {
+  return DATA.versions.filter((v) => STATE.selected.has(v.id) && !v.error);
+}
+function datasetsOf(version, scenarioId) {
+  return version.datasets.filter((d) => !scenarioId || d.scenario === scenarioId);
+}
+/* Gewichtetes Mittel über Datensätze (Gewicht = Anzahl bewerteter Anrufe) */
+function pooled(datasets, metricKey) {
+  let sum = 0, n = 0, used = 0;
+  datasets.forEach((d) => {
+    const s = d.scores[metricKey];
+    if (!s || s.avg === null) return;
+    const w = s.n || d.runCount || 0;
+    sum += s.avg * w; n += w; used++;
+  });
+  return n ? { avg: sum / n, n, datasets: used } : null;
+}
+function metricsIn(datasets) {
+  const set = new Set();
+  datasets.forEach((d) => Object.keys(d.scores).forEach((k) => set.add(k)));
+  return [...set].sort((a, b) => (metricInfo(a).order || 999) - (metricInfo(b).order || 999) || a.localeCompare(b));
+}
+function decimalsForMetric(key) {
+  return metricInfo(key).typ === 'regelbasiert' ? 1 : 0;
+}
+function scenarioOf(id) { return SCENARIOS.find((s) => s.id === id); }
+
+/* ==========================================================================
+   4 — Zustand
+   ========================================================================== */
+const STATE = {
+  selected: new Set(),
+  openScenario: null,
+  openMetric: {},          // scenarioId → metricKey
+  tables: new Set(),       // Chart-IDs mit Tabellenansicht
+  exampleDataset: {},      // "scenario::metric" → dataset-Name
+};
+
+/* ==========================================================================
+   5 — Rendering: Grundgerüst
+   ========================================================================== */
+const $ = (sel) => document.querySelector(sel);
+
+function renderAll() {
+  renderFilterbar();
+  renderKpis();
+  renderAggregate();
+  renderScenarios();
+  renderScenarioDetail();
+  renderFooter();
+}
+
+function renderFilterbar() {
+  const box = $('#version-chips');
+  box.textContent = '';
+  DATA.versions.forEach((v) => {
+    const b = document.createElement('button');
+    b.className = 'chip';
+    b.type = 'button';
+    b.setAttribute('aria-pressed', STATE.selected.has(v.id) ? 'true' : 'false');
+    b.style.setProperty('--chip-color', versionColor(v.id));
+    const sw = document.createElement('span');
+    sw.className = 'swatch';
+    b.appendChild(sw);
+    b.appendChild(document.createTextNode(v.id));
+    if (v.error) { b.disabled = true; b.title = v.error; }
+    b.addEventListener('click', () => {
+      if (STATE.selected.has(v.id)) {
+        if (STATE.selected.size > 1) STATE.selected.delete(v.id);
+      } else {
+        if (STATE.selected.size >= MAX_COMPARE) return;
+        STATE.selected.add(v.id);
+      }
+      renderAll();
+    });
+    box.appendChild(b);
+  });
+  const note = $('#filter-note');
+  note.textContent = DATA.versions.length > 1
+    ? `${STATE.selected.size} von ${DATA.versions.length} Versionen ausgewählt · max. ${MAX_COMPARE} gleichzeitig`
+    : 'Weitere Versionen erscheinen automatisch, sobald ein neuer Versionsordner im Datenrepository liegt.';
+}
+
+function kpiTile(label, value, hint) {
+  const d = document.createElement('div');
+  d.className = 'kpi';
+  const l = document.createElement('div'); l.className = 'k-label'; l.textContent = label;
+  const v = document.createElement('div'); v.className = 'k-value'; v.textContent = value;
+  d.appendChild(l); d.appendChild(v);
+  if (hint) { const h = document.createElement('div'); h.className = 'k-hint'; h.textContent = hint; d.appendChild(h); }
+  return d;
+}
+
+function renderKpis() {
+  const box = $('#kpis');
+  box.textContent = '';
+  const versions = selectedVersions();
+  versions.forEach((v) => {
+    const ds = v.datasets;
+    const calls = ds.reduce((a, d) => a + (d.runCount || 0), 0);
+    const errW = ds.reduce((a, d) => a + (d.errorRate || 0) * (d.runCount || 0), 0);
+    const lat = ds.reduce((a, d) => a + (d.latencyP50 || 0) * (d.runCount || 0), 0);
+    const cost = ds.reduce((a, d) => a + (d.cost || 0), 0);
+    const tokens = ds.reduce((a, d) => a + (d.tokens || 0), 0);
+    const scen = new Set(ds.map((d) => d.scenario));
+
+    const block = document.createElement('div');
+    block.className = 'kpi-block';
+    if (versions.length > 1 || DATA.versions.length > 1) {
+      const head = document.createElement('div');
+      head.className = 'kpi-version';
+      const sw = document.createElement('span');
+      sw.className = 'swatch';
+      sw.style.background = versionColor(v.id);
+      head.appendChild(sw);
+      head.appendChild(document.createTextNode(`Version ${v.id}`));
+      block.appendChild(head);
+    }
+    const row = document.createElement('div');
+    row.className = 'kpi-row';
+    row.appendChild(kpiTile('Simulationsanrufe', fmtInt(calls), `${ds.length} Datensätze · ${scen.size} Szenarien`));
+    row.appendChild(kpiTile('Datensätze', fmtInt(ds.length), 'je 100 simulierte Anrufe'));
+    row.appendChild(kpiTile('Metriken', fmtInt(metricsIn(ds).length), 'szenarioabhängig angewendet'));
+    row.appendChild(kpiTile('Fehlerrate', calls ? fmtPct(errW / calls, 1) : '–', 'technische Fehler im Lauf'));
+    row.appendChild(kpiTile('Gesprächsdauer p50', calls ? fmtNum(lat / calls, 1) + ' s' : '–', 'Median je Anruf, über Datensätze gemittelt'));
+    row.appendChild(kpiTile('Modellkosten', fmtNum(cost, 2) + ' $', `${fmtInt(tokens)} Tokens gesamt`));
+    block.appendChild(row);
+    box.appendChild(block);
+  });
+  if (!versions.length) {
+    const p = document.createElement('p');
+    p.className = 'state';
+    p.textContent = 'Keine Version ausgewählt.';
+    box.appendChild(p);
+  }
+}
+
+/* --- Diagrammkarte mit Diagramm-/Tabellen-Umschalter -------------------- */
+function chartCard({ id, title, subtitle, build, buildTable, footnote }) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  const head = document.createElement('div');
+  head.className = 'card-head';
+  const wrapT = document.createElement('div');
+  const h = document.createElement('h3'); h.textContent = title;
+  wrapT.appendChild(h);
+  if (subtitle) { const p = document.createElement('p'); p.textContent = subtitle; wrapT.appendChild(p); }
+  head.appendChild(wrapT);
+
+  const toggle = document.createElement('div');
+  toggle.className = 'toggle-row';
+  const mk = (label, mode) => {
+    const b = document.createElement('button');
+    b.className = 'tbtn'; b.type = 'button'; b.textContent = label;
+    const active = (mode === 'table') === STATE.tables.has(id);
+    b.setAttribute('aria-pressed', active ? 'true' : 'false');
+    b.addEventListener('click', () => {
+      if (mode === 'table') STATE.tables.add(id); else STATE.tables.delete(id);
+      renderAll();
+    });
+    return b;
+  };
+  toggle.appendChild(mk('Diagramm', 'chart'));
+  toggle.appendChild(mk('Tabelle', 'table'));
+  head.appendChild(toggle);
+  card.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'card-body';
+  card.appendChild(body);
+  if (footnote) {
+    const f = document.createElement('div');
+    f.className = 'card-foot';
+    f.textContent = footnote;
+    card.appendChild(f);
+  }
+  // Nach dem Einfügen zeichnen (Breite muss messbar sein)
+  requestAnimationFrame(() => {
+    if (STATE.tables.has(id)) buildTable(body); else build(body);
+  });
+  return card;
+}
+
+/* --- Zeilen für das Punktdiagramm aufbauen ----------------------------- */
+function metricRows(metricKeys, valueFor, hintFor) {
+  const rows = [];
+  METRIC_GROUPS.forEach((g) => {
+    const keys = metricKeys.filter((k) => metricInfo(k).group === g.id);
+    if (!keys.length) return;
+    rows.push({ kind: 'group', label: g.name });
+    keys.forEach((k) => {
+      const mi = metricInfo(k);
+      rows.push({
+        label: mi.name,
+        glyph: DIRECTION_GLYPH[mi.direction] || '',
+        hint: hintFor ? hintFor(k) : null,
+        target: mi.direction === 'ziel' ? mi.target : null,
+        decimals: decimalsForMetric(k),
+        metricKey: k,
+        points: valueFor(k),
+      });
+    });
+  });
+  return rows;
+}
+
+function versionLegend() {
+  return selectedVersions().map((v) => ({ id: v.id, color: versionColor(v.id) }));
+}
+
+/* --- Sektion: aggregiert über alle Szenarien --------------------------- */
+function renderAggregate() {
+  const box = $('#aggregate');
+  box.textContent = '';
+  const versions = selectedVersions();
+  if (!versions.length) return;
+  const allKeys = metricsIn(versions.flatMap((v) => v.datasets));
+
+  const valueFor = (k) => versions.map((v) => {
+    const p = pooled(v.datasets, k);
+    return {
+      version: v.id, color: versionColor(v.id),
+      value: p ? p.avg : null, n: p ? p.n : null,
+      meta: p ? `${p.datasets} ${p.datasets === 1 ? 'Datensatz' : 'Datensätze'}` : null,
+    };
+  });
+  const hintFor = (k) => {
+    const p = pooled(versions[0].datasets, k);
+    const mi = metricInfo(k);
+    const scope = p ? `${p.datasets} von ${versions[0].datasets.length} Datensätzen · ${fmtInt(p.n)} Anrufe` : 'nicht erhoben';
+    return `${mi.typ} · ${DIRECTION_TEXT[mi.direction]}${mi.direction === 'ziel' ? ' ' + fmtPct(mi.target, 0) : ''} · ${scope}`;
+  };
+
+  box.appendChild(chartCard({
+    id: 'agg',
+    title: 'Alle Szenarien zusammengefasst',
+    subtitle: TEXTS.aggHinweis,
+    footnote: 'Ein Punkt ist ein Metrikwert einer Version. Die Zielrichtung steht in jeder Zeile: ↑ hoch ist gut, ↓ niedrig ist gut, ◎ Idealwert (senkrechte Marke im Diagramm).',
+    build: (el2) => {
+      dotPlot(el2, {
+        rows: metricRows(allKeys, valueFor, hintFor),
+        versions: versionLegend(),
+        decimalsFor: (row) => row.decimals,
+        ariaLabel: 'Metrikwerte aggregiert über alle Szenarien',
+        axisLabel: 'Anteil der Anrufe · Score-Metriken auf 0–100 % skaliert',
+      });
+    },
+    buildTable: (el2) => {
+      const cols = [{ label: 'Metrik' }, { label: 'Typ' }, { label: 'Zielrichtung' }];
+      versions.forEach((v) => cols.push({ label: v.id, color: versionColor(v.id) }));
+      cols.push({ label: 'Anrufe' });
+      const rows = [];
+      METRIC_GROUPS.forEach((g) => {
+        const keys = allKeys.filter((k) => metricInfo(k).group === g.id);
+        if (!keys.length) return;
+        rows.push({ group: g.name });
+        keys.forEach((k) => {
+          const mi = metricInfo(k);
+          const cells = [mi.name, mi.typ,
+            (DIRECTION_GLYPH[mi.direction] || '') + ' ' + DIRECTION_TEXT[mi.direction] + (mi.direction === 'ziel' ? ' ' + fmtPct(mi.target, 0) : '')];
+          let nn = null;
+          versions.forEach((v) => {
+            const p = pooled(v.datasets, k);
+            cells.push(p ? fmtPct(p.avg, decimalsForMetric(k)) : null);
+            if (p) nn = p.n;
+          });
+          cells.push(nn ? fmtInt(nn) : null);
+          rows.push({ cells });
+        });
+      });
+      renderTable(el2, { columns: cols, rows, caption: 'Metrikwerte aggregiert über alle Szenarien' });
+    },
+  }));
+}
+
+/* --- Sektion: nach Szenario ------------------------------------------- */
+function renderScenarios() {
+  const box = $('#scenarios');
+  box.textContent = '';
+  const versions = selectedVersions();
+  if (!versions.length) return;
+
+  const grid = document.createElement('div');
+  grid.className = 'scenario-grid';
+
+  SCENARIOS.forEach((sc) => {
+    const dsAll = versions.flatMap((v) => datasetsOf(v, sc.id));
+    if (!dsAll.length) return;
+    const keys = metricsIn(dsAll);
+    const isOpen = STATE.openScenario === sc.id;
+
+    const card = document.createElement('div');
+    card.className = 'card scenario-card';
+    card.dataset.open = isOpen ? 'true' : 'false';
+
+    const head = document.createElement('div');
+    head.className = 'card-head';
+    head.setAttribute('role', 'button');
+    head.setAttribute('tabindex', '0');
+    head.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    const wrapT = document.createElement('div');
+    const h = document.createElement('h3');
+    h.textContent = sc.name;
+    wrapT.appendChild(h);
+    const p = document.createElement('p');
+    const nCalls = versions.map((v) => datasetsOf(v, sc.id).reduce((a, d) => a + d.runCount, 0));
+    const nSub = datasetsOf(versions[0], sc.id).length;
+    p.textContent = `${sc.kurz} — ${nSub} ${nSub === 1 ? 'Sub-Szenario' : 'Sub-Szenarien'}, ${fmtInt(nCalls[0])} Anrufe je Version`;
+    wrapT.appendChild(p);
+    head.appendChild(wrapT);
+    const open = document.createElement('span');
+    open.className = 'sc-open';
+    open.appendChild(document.createTextNode(isOpen ? 'Details schliessen' : 'Sub-Szenarien'));
+    const caret = document.createElement('span');
+    caret.className = 'caret';
+    open.appendChild(caret);
+    head.appendChild(open);
+    const toggle = () => {
+      STATE.openScenario = isOpen ? null : sc.id;
+      renderAll();
+      if (!isOpen) requestAnimationFrame(() => {
+        const d = $('#scenario-detail');
+        if (d) d.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    };
+    head.addEventListener('click', toggle);
+    head.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    });
+    card.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'card-body';
+    card.appendChild(body);
+    const valueFor = (k) => versions.map((v) => {
+      const pp = pooled(datasetsOf(v, sc.id), k);
+      return { version: v.id, color: versionColor(v.id), value: pp ? pp.avg : null, n: pp ? pp.n : null };
+    });
+    const hintFor = (k) => {
+      const pp = pooled(datasetsOf(versions[0], sc.id), k);
+      const mi = metricInfo(k);
+      return `${DIRECTION_TEXT[mi.direction]}${mi.direction === 'ziel' ? ' ' + fmtPct(mi.target, 0) : ''}${pp ? ` · ${pp.datasets} von ${nSub} Sub-Szenarien` : ''}`;
+    };
+    requestAnimationFrame(() => {
+      dotPlot(body, {
+        rows: metricRows(keys, valueFor, hintFor),
+        versions: versionLegend(),
+        decimalsFor: (row) => row.decimals,
+        ariaLabel: `Metrikwerte im Szenario ${sc.name}`,
+        axisLabel: 'Anteil der Anrufe · über Sub-Szenarien gewichtet',
+      });
+    });
+
+    const foot = document.createElement('div');
+    foot.className = 'card-foot';
+    foot.textContent = 'Karte anklicken für die Sub-Szenarien und die Verteilungen der Metriken.';
+    card.appendChild(foot);
+
+    grid.appendChild(card);
+  });
+  box.appendChild(grid);
+}
+
+/* --- Szenario-Detail --------------------------------------------------- */
+function renderScenarioDetail() {
+  const box = $('#scenario-detail');
+  box.textContent = '';
+  const sc = scenarioOf(STATE.openScenario);
+  if (!sc) return;
+  const versions = selectedVersions();
+  if (!versions.length) return;
+  const primary = versions[0];
+  const subs = datasetsOf(primary, sc.id);
+  const keys = metricsIn(versions.flatMap((v) => datasetsOf(v, sc.id)));
+
+  const panel = document.createElement('div');
+  panel.className = 'detail';
+
+  const head = document.createElement('div');
+  head.className = 'detail-head';
+  const hrow = document.createElement('div');
+  hrow.style.display = 'flex';
+  hrow.style.alignItems = 'flex-start';
+  hrow.style.gap = '14px';
+  const htxt = document.createElement('div');
+  const eyebrow = document.createElement('div');
+  eyebrow.className = 'eyebrow';
+  eyebrow.textContent = 'Szenario-Detail';
+  const h3 = document.createElement('h3');
+  h3.textContent = sc.name;
+  htxt.appendChild(eyebrow);
+  htxt.appendChild(h3);
+  const desc = document.createElement('p');
+  desc.textContent = sc.desc;
+  htxt.appendChild(desc);
+  hrow.appendChild(htxt);
+  const close = document.createElement('button');
+  close.className = 'close-x';
+  close.type = 'button';
+  close.setAttribute('aria-label', 'Szenario-Detail schliessen');
+  close.textContent = '✕';
+  close.addEventListener('click', () => { STATE.openScenario = null; renderAll(); });
+  hrow.appendChild(close);
+  head.appendChild(hrow);
+  panel.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'detail-body';
+
+  /* Sub-Szenarien */
+  const h5a = document.createElement('h5');
+  h5a.className = 'eyebrow';
+  h5a.style.marginBottom = '10px';
+  h5a.textContent = `Sub-Szenarien (${subs.length})`;
+  body.appendChild(h5a);
+  const list = document.createElement('div');
+  list.className = 'subscenario-list';
+  subs.forEach((d) => {
+    const c = document.createElement('div');
+    c.className = 'subsc';
+    const t = document.createElement('h5');
+    t.appendChild(document.createTextNode(d.info.name));
+    if (d.info.variante === 'Multiinfo') {
+      const tg = document.createElement('span'); tg.className = 'tag multi'; tg.textContent = 'Multiinfo'; t.appendChild(tg);
+    }
+    if (d.info.kalender === true) {
+      const tg = document.createElement('span'); tg.className = 'tag cal'; tg.textContent = 'Kalender aktiv'; t.appendChild(tg);
+    } else if (d.info.kalender === false) {
+      const tg = document.createElement('span'); tg.className = 'tag'; tg.textContent = 'ohne Kalender'; t.appendChild(tg);
+    }
+    c.appendChild(t);
+    const pp = document.createElement('p');
+    pp.textContent = d.info.desc;
+    c.appendChild(pp);
+    const meta = document.createElement('p');
+    meta.className = 'muted';
+    meta.style.fontSize = '11.5px';
+    meta.style.color = 'var(--ink-3)';
+    meta.textContent = `Datensatz: ${d.dataset} · ${fmtInt(d.runCount)} Anrufe · Kontaktdaten: ${d.info.kontakt}`;
+    c.appendChild(meta);
+    list.appendChild(c);
+  });
+  body.appendChild(list);
+
+  if (subs.some((d) => d.info.variante === 'Multiinfo')) {
+    const note = document.createElement('div');
+    note.className = 'note';
+    note.textContent = TEXTS.multiinfo;
+    body.appendChild(note);
+  }
+
+  /* Metrik-Panels */
+  const h5b = document.createElement('h5');
+  h5b.className = 'eyebrow';
+  h5b.style.margin = '26px 0 10px';
+  h5b.textContent = 'Metriken je Sub-Szenario';
+  body.appendChild(h5b);
+
+  const grid = document.createElement('div');
+  grid.className = 'metric-grid';
+  keys.forEach((k) => grid.appendChild(metricPanel(sc, k, versions)));
+  body.appendChild(grid);
+
+  panel.appendChild(body);
+  box.appendChild(panel);
+}
+
+/* --- Ein Metrik-Panel (Punktdiagramm über Sub-Szenarien) --------------- */
+function metricPanel(sc, metricKey, versions) {
+  const mi = metricInfo(metricKey);
+  const isOpen = STATE.openMetric[sc.id] === metricKey;
+  const panel = document.createElement('div');
+  panel.className = 'metric-panel';
+  panel.dataset.open = isOpen ? 'true' : 'false';
+
+  const head = document.createElement('div');
+  head.className = 'mp-head';
+  head.setAttribute('role', 'button');
+  head.setAttribute('tabindex', '0');
+  head.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  const txt = document.createElement('div');
+  const h4 = document.createElement('h4');
+  h4.textContent = (DIRECTION_GLYPH[mi.direction] || '') + ' ' + mi.name;
+  txt.appendChild(h4);
+  const sub = document.createElement('div');
+  sub.className = 'mp-sub';
+  sub.textContent = `${mi.typ} · ${DIRECTION_TEXT[mi.direction]}${mi.direction === 'ziel' ? ' ' + fmtPct(mi.target, 0) : ''}`;
+  txt.appendChild(sub);
+  head.appendChild(txt);
+  const open = document.createElement('span');
+  open.className = 'mp-open';
+  open.appendChild(document.createTextNode(isOpen ? 'schliessen' : 'Verteilung'));
+  const caret = document.createElement('span');
+  caret.className = 'caret';
+  open.appendChild(caret);
+  head.appendChild(open);
+  const toggle = () => {
+    STATE.openMetric[sc.id] = isOpen ? null : metricKey;
+    renderAll();
+  };
+  head.addEventListener('click', toggle);
+  head.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  panel.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'mp-body';
+  panel.appendChild(body);
+
+  const rows = datasetsOf(versions[0], sc.id).map((d0) => {
+    const points = versions.map((v) => {
+      const d = v.datasets.find((x) => x.dataset === d0.dataset);
+      const s = d && d.scores[metricKey];
+      return {
+        version: v.id, color: versionColor(v.id),
+        value: s ? s.avg : null, n: s ? s.n : null,
+      };
+    });
+    return {
+      label: d0.info.name,
+      hint: d0.info.variante === 'Multiinfo' ? 'Multiinfo-Variante' : null,
+      target: mi.direction === 'ziel' ? mi.target : null,
+      decimals: decimalsForMetric(metricKey),
+      points,
+    };
+  });
+  requestAnimationFrame(() => {
+    dotPlot(body, {
+      rows,
+      versions: versions.map((v) => ({ id: v.id, color: versionColor(v.id) })),
+      decimalsFor: (row) => row.decimals,
+      ariaLabel: `${mi.name} je Sub-Szenario`,
+      axisLabel: 'Anteil der Anrufe je Sub-Szenario',
+    });
+  });
+
+  if (isOpen) panel.appendChild(metricDetail(sc, metricKey, versions));
+  return panel;
+}
+
+/* --- Metrik-Detail: Steckbrief, Verteilung, Beispiele ------------------ */
+function metricDetail(sc, metricKey, versions) {
+  const mi = metricInfo(metricKey);
+  const wrap = document.createElement('div');
+  wrap.className = 'metric-detail';
+
+  /* Steckbrief */
+  const h1 = document.createElement('h5');
+  h1.textContent = 'Steckbrief der Metrik';
+  wrap.appendChild(h1);
+  const sb = document.createElement('div');
+  sb.className = 'steckbrief';
+  const add = (k, v) => {
+    const d = document.createElement('div');
+    d.className = 'sb';
+    const kk = document.createElement('div'); kk.className = 'sb-k'; kk.textContent = k;
+    const vv = document.createElement('div'); vv.className = 'sb-v'; vv.textContent = v;
+    d.appendChild(kk); d.appendChild(vv);
+    sb.appendChild(d);
+  };
+  add('Spaltenname in den Daten', metricKey);
+  add('Messverfahren', mi.typ);
+  add('Skala', mi.scale);
+  add('Zielrichtung', (DIRECTION_GLYPH[mi.direction] || '') + ' ' + DIRECTION_TEXT[mi.direction]
+    + (mi.direction === 'ziel' ? ' ' + fmtPct(mi.target, 0) : ''));
+  wrap.appendChild(sb);
+
+  if (mi.frage) {
+    const q = document.createElement('p');
+    q.style.fontSize = '13.5px';
+    q.style.margin = '12px 0 0';
+    const b = document.createElement('strong');
+    b.textContent = 'Bewertungsfrage: ';
+    q.appendChild(b);
+    q.appendChild(document.createTextNode(mi.frage));
+    wrap.appendChild(q);
+  }
+  const dsc = document.createElement('p');
+  dsc.style.fontSize = '13px';
+  dsc.style.color = 'var(--ink-2)';
+  dsc.style.margin = '8px 0 0';
+  dsc.textContent = mi.desc;
+  wrap.appendChild(dsc);
+  if (mi.hinweis) {
+    const n = document.createElement('div');
+    n.className = 'note';
+    n.textContent = mi.hinweis;
+    wrap.appendChild(n);
+  }
+  if (metricKey === 'danke_score') {
+    const n = document.createElement('div');
+    n.className = 'note';
+    n.textContent = 'Darstellung: Der Score liegt zwischen 0 und 1 und wird im Dashboard einheitlich als Prozentwert der Skala gezeigt (0,50 entspricht 50 %), damit alle Metriken auf einer Achse vergleichbar bleiben.';
+    wrap.appendChild(n);
+  }
+
+  /* Verteilung — braucht die Runs-Dateien */
+  const h2 = document.createElement('h5');
+  h2.textContent = 'Verteilung über die einzelnen Anrufe';
+  wrap.appendChild(h2);
+  const distBox = document.createElement('div');
+  distBox.innerHTML = '<div class="state"><span class="loading"><span class="spinner"></span>Einzelergebnisse werden aus dem Datenrepository geladen …</span></div>';
+  wrap.appendChild(distBox);
+
+  const h3 = document.createElement('h5');
+  h3.textContent = 'Beispielgespräche';
+  wrap.appendChild(h3);
+  const exBox = document.createElement('div');
+  exBox.innerHTML = '<div class="state"><span class="loading"><span class="spinner"></span>Transkripte werden geladen …</span></div>';
+  wrap.appendChild(exBox);
+
+  const needed = [];
+  versions.forEach((v) => datasetsOf(v, sc.id).forEach((d) => {
+    if (d.scores[metricKey]) needed.push(d);
+  }));
+
+  Promise.all(needed.map((d) => loadRuns(d).then(() => d).catch((e) => ({ error: e, ds: d }))))
+    .then(() => {
+      renderDistribution(distBox, needed, metricKey, versions);
+      renderExamples(exBox, sc, needed, metricKey);
+    })
+    .catch((e) => {
+      distBox.textContent = '';
+      distBox.appendChild(errorBox('Einzelergebnisse konnten nicht geladen werden.', e.message));
+      exBox.textContent = '';
+    });
+
+  return wrap;
+}
+
+function renderDistribution(box, datasets, metricKey, versions) {
+  box.textContent = '';
+  const usable = datasets.filter((d) => Array.isArray(d.runs));
+  if (!usable.length) {
+    box.appendChild(errorBox('Keine Einzelergebnisse verfügbar.',
+      'Für die betroffenen Datensätze liegt keine Runs-Datei im Repository.'));
+    return;
+  }
+  const mi = metricInfo(metricKey);
+  const allValues = usable.flatMap((d) => d.runs.map((r) => r.feedback[metricKey]).filter((x) => x !== null && x !== undefined));
+  const binaer = allValues.every((v) => v === 0 || v === 1);
+
+  const legend = document.createElement('div');
+  legend.className = 'chart-legend';
+  const li = document.createElement('span');
+  li.className = 'legend-item';
+  if (binaer) {
+    const d1 = document.createElement('span'); d1.className = 'legend-dot'; d1.style.background = versionColor(usable[0].version);
+    li.appendChild(d1);
+    li.appendChild(document.createTextNode('ein Punkt = ein Anruf mit Bewertung 1'));
+    legend.appendChild(li);
+    const li2 = document.createElement('span'); li2.className = 'legend-item';
+    const d2 = document.createElement('span'); d2.className = 'legend-dot'; d2.style.background = '#E0E0E0';
+    li2.appendChild(d2);
+    li2.appendChild(document.createTextNode('Bewertung 0'));
+    legend.appendChild(li2);
+  } else {
+    li.appendChild(document.createTextNode('Histogramm: Anzahl Anrufe je Wertebereich'));
+    legend.appendChild(li);
+  }
+  box.appendChild(legend);
+
+  if (binaer) {
+    const grid = document.createElement('div');
+    grid.className = 'waffle-grid';
+    usable.forEach((d) => {
+      const vals = d.runs.map((r) => r.feedback[metricKey]).filter((x) => x !== null && x !== undefined);
+      const ones = vals.filter((x) => x === 1).length;
+      const card = document.createElement('div');
+      card.className = 'waffle-card';
+      const t = document.createElement('div'); t.className = 'w-title'; t.textContent = d.info.name;
+      card.appendChild(t);
+      if (versions.length > 1) {
+        const s = document.createElement('div'); s.className = 'w-sub';
+        s.textContent = 'Version ' + d.version;
+        card.appendChild(s);
+      }
+      const val = document.createElement('div'); val.className = 'w-value';
+      val.textContent = fmtPct(vals.length ? ones / vals.length : null, 0);
+      const sp = document.createElement('span');
+      sp.textContent = `${fmtInt(ones)} von ${fmtInt(vals.length)} Anrufen`;
+      val.appendChild(sp);
+      card.appendChild(val);
+      const w = document.createElement('div');
+      card.appendChild(w);
+      waffle(w, { n: vals.length, ones, color: versionColor(d.version) });
+      grid.appendChild(card);
+    });
+    box.appendChild(grid);
+  } else {
+    const domainMax = Math.max(0.2, Math.min(1, Math.ceil(Math.max(...allValues) * 10) / 10));
+    const grid = document.createElement('div');
+    grid.className = 'hist-grid';
+    usable.forEach((d) => {
+      const vals = d.runs.map((r) => r.feedback[metricKey]).filter((x) => x !== null && x !== undefined);
+      const st = stats(vals);
+      const card = document.createElement('div');
+      card.className = 'waffle-card';
+      const t = document.createElement('div'); t.className = 'w-title'; t.textContent = d.info.name;
+      card.appendChild(t);
+      const s = document.createElement('div'); s.className = 'w-sub';
+      s.textContent = `${versions.length > 1 ? 'Version ' + d.version + ' · ' : ''}Ø ${fmtPct(st.mean, 1)} · Median ${fmtPct(st.median, 1)}`;
+      card.appendChild(s);
+      const hbox = document.createElement('div');
+      card.appendChild(hbox);
+      grid.appendChild(card);
+      requestAnimationFrame(() => {
+        histogram(hbox, {
+          values: vals, color: versionColor(d.version), bins: 12,
+          domain: [0, domainMax],
+          target: mi.direction === 'ziel' ? mi.target : null,
+          label: `${mi.name} — Verteilung in ${d.info.name}`,
+        });
+      });
+    });
+    box.appendChild(grid);
+  }
+
+  /* Statistiktabelle (Tabellen-Zwilling der Verteilung) */
+  const h = document.createElement('h5');
+  h.textContent = 'Kennzahlen der Verteilung';
+  box.appendChild(h);
+  const tblBox = document.createElement('div');
+  const dec = decimalsForMetric(metricKey);
+  renderTable(tblBox, {
+    columns: [{ label: 'Sub-Szenario' }, { label: 'Version' }, { label: 'Anrufe' }, { label: 'Mittelwert' },
+      { label: 'Median' }, { label: 'Std.abw.' }, { label: 'Minimum' }, { label: 'Maximum' }],
+    rows: usable.map((d) => {
+      const vals = d.runs.map((r) => r.feedback[metricKey]).filter((x) => x !== null && x !== undefined);
+      const st = stats(vals);
+      return {
+        cells: [d.info.name, d.version, fmtInt(st.n), fmtPct(st.mean, Math.max(dec, 1)),
+          fmtPct(st.median, Math.max(dec, 1)), fmtPct(st.sd, Math.max(dec, 1)),
+          fmtPct(st.min, Math.max(dec, 1)), fmtPct(st.max, Math.max(dec, 1))],
+      };
+    }),
+    caption: 'Kennzahlen der Verteilung je Sub-Szenario',
+  });
+  box.appendChild(tblBox);
+}
+
+/* --- Beispielgespräche ------------------------------------------------- */
+const ROLE_LABEL = { assistant: 'Digitale Assistenz', user: 'Simulierte anrufende Person' };
+const INPUT_LABEL = {
+  Name: 'Name', Telefon: 'Telefonnummer', email: 'E-Mail-Adresse',
+  Kundennummer: 'Kundennummer', availability: 'Erreichbarkeit', call_intent: 'Anrufgrund',
+};
+
+function renderExamples(box, sc, datasets, metricKey) {
+  box.textContent = '';
+  const usable = datasets.filter((d) => Array.isArray(d.runs));
+  if (!usable.length) return;
+  const stateKey = sc.id + '::' + metricKey;
+  const chosenName = STATE.exampleDataset[stateKey] || usable[0].key;
+  const ds = usable.find((d) => d.key === chosenName) || usable[0];
+
+  const controls = document.createElement('div');
+  controls.className = 'example-controls';
+  const lab = document.createElement('label');
+  lab.textContent = 'Sub-Szenario: ';
+  lab.style.fontSize = '12.5px';
+  lab.style.color = 'var(--ink-2)';
+  const sel = document.createElement('select');
+  sel.className = 'sel';
+  usable.forEach((d) => {
+    const o = document.createElement('option');
+    o.value = d.key;
+    o.textContent = d.info.name + (selectedVersions().length > 1 ? ` (${d.version})` : '');
+    if (d.key === ds.key) o.selected = true;
+    sel.appendChild(o);
+  });
+  sel.addEventListener('change', () => {
+    STATE.exampleDataset[stateKey] = sel.value;
+    renderExamples(box, sc, datasets, metricKey);
+  });
+  lab.appendChild(sel);
+  controls.appendChild(lab);
+  const hint = document.createElement('span');
+  hint.style.fontSize = '12px';
+  hint.style.color = 'var(--ink-3)';
+  hint.textContent = 'Gegenüberstellung: ein Anruf mit dem niedrigsten und einer mit dem höchsten Metrikwert.';
+  controls.appendChild(hint);
+  box.appendChild(controls);
+
+  const scored = ds.runs
+    .map((r) => ({ r, v: r.feedback[metricKey] }))
+    .filter((x) => x.v !== null && x.v !== undefined)
+    .sort((a, b) => a.v - b.v);
+  if (!scored.length) return;
+  const lowest = scored[0], highest = scored[scored.length - 1];
+  const picks = lowest.r === highest.r ? [lowest] : [lowest, highest];
+
+  const grid = document.createElement('div');
+  grid.className = 'transcript-grid';
+  picks.forEach((p, idx) => grid.appendChild(transcriptCard(p, metricKey, ds, picks.length === 1 ? '' : idx === 0 ? 'Niedrigster Wert' : 'Höchster Wert')));
+  box.appendChild(grid);
+}
+
+function transcriptCard(pick, metricKey, ds, tag) {
+  const card = document.createElement('div');
+  card.className = 'transcript';
+  const head = document.createElement('div');
+  head.className = 't-head';
+  const score = document.createElement('div');
+  score.className = 't-score';
+  score.textContent = `${tag ? tag + ' · ' : ''}${metricInfo(metricKey).short}: ${fmtPct(pick.v, decimalsForMetric(metricKey))}`;
+  head.appendChild(score);
+  const vars = document.createElement('div');
+  vars.className = 't-vars';
+  const parts = [];
+  Object.keys(pick.r.inputs).forEach((k) => {
+    const v = pick.r.inputs[k];
+    if (!v) return;
+    parts.push(`${INPUT_LABEL[k] || k}: ${v}`);
+  });
+  vars.textContent = parts.join(' · ');
+  head.appendChild(vars);
+  const meta = document.createElement('div');
+  meta.className = 't-vars';
+  meta.style.color = 'var(--ink-3)';
+  const others = Object.keys(pick.r.feedback)
+    .filter((k) => k !== metricKey && pick.r.feedback[k] !== null)
+    .map((k) => `${metricInfo(k).short} ${fmtPct(pick.r.feedback[k], decimalsForMetric(k))}`);
+  meta.textContent = [`Dauer ${fmtNum(pick.r.executionTime, 1)} s`, ...others].join(' · ');
+  head.appendChild(meta);
+  card.appendChild(head);
+
+  const turns = document.createElement('div');
+  turns.className = 'turns';
+  const traj = parseTrajectory(pick.r.trajectoryRaw);
+  if (!traj.length) {
+    const p = document.createElement('div');
+    p.className = 'turn hangup';
+    p.textContent = 'Der Gesprächsverlauf konnte nicht gelesen werden.';
+    turns.appendChild(p);
+  }
+  traj.forEach((t) => {
+    const d = document.createElement('div');
+    const content = (t.content || '').trim();
+    if (!content) {
+      d.className = 'turn hangup';
+      d.textContent = `(kein Beitrag – ${ROLE_LABEL[t.role] || t.role} legt auf bzw. schweigt)`;
+      turns.appendChild(d);
+      return;
+    }
+    d.className = 'turn ' + (t.role === 'assistant' ? 'assistant' : 'user');
+    const who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = ROLE_LABEL[t.role] || t.role;
+    d.appendChild(who);
+    d.appendChild(document.createTextNode(content));
+    turns.appendChild(d);
+  });
+  card.appendChild(turns);
+  return card;
+}
+
+/* --- Fehleranzeige ----------------------------------------------------- */
+function errorBox(title, detail) {
+  const d = document.createElement('div');
+  d.className = 'state error';
+  const s = document.createElement('strong');
+  s.textContent = title;
+  d.appendChild(s);
+  if (detail) {
+    const c = document.createElement('code');
+    c.textContent = detail;
+    d.appendChild(c);
+  }
+  return d;
+}
+
+/* --- Intro-Karten und Fussbereich ------------------------------------- */
+function renderIntro() {
+  const box = $('#intro');
+  box.textContent = '';
+  const grid = document.createElement('div');
+  grid.className = 'intro-grid';
+  TEXTS.intro.forEach((sec, i) => {
+    const det = document.createElement('details');
+    det.className = 'info';
+    if (i === 0) det.open = true;
+    const sum = document.createElement('summary');
+    sum.textContent = sec.titel;
+    det.appendChild(sum);
+    const b = document.createElement('div');
+    b.className = 'info-body';
+    b.innerHTML = sec.body; // feste, im Dashboard hinterlegte Texte
+    det.appendChild(b);
+    grid.appendChild(det);
+  });
+  box.appendChild(grid);
+}
+
+function renderFooter() {
+  const box = $('#foot');
+  box.textContent = '';
+  const versions = DATA.versions.map((v) => v.id).join(', ');
+  const dsCount = DATA.versions.reduce((a, v) => a + v.datasets.length, 0);
+  const via = DATA.source === 'manifest'
+    ? `Verzeichnis aus manifest.json${DATA.generated ? ` (erzeugt ${new Date(DATA.generated).toLocaleString('de-DE')})` : ''}`
+    : 'Verzeichnis über die GitHub-Contents-API';
+  const lines = [
+    `Datenquelle: GitHub-Repository ${CONFIG.owner}/${CONFIG.repo} (Branch ${CONFIG.branch}) · ${via} · gefundene Versionen: ${versions || '–'} · ${dsCount} Datensätze`,
+    'Die Ergebnisdateien werden bei jedem Laden direkt aus dem Repository gelesen. Neue Daten oder eine neue Version erscheinen ohne erneutes Deployment des Dashboards.',
+    'Alle Anrufe sind simuliert. Surfers Immobilien ist eine fiktive Wohnungsgenossenschaft, die als Testumgebung dient.',
+  ];
+  lines.forEach((t) => {
+    const p = document.createElement('div');
+    p.textContent = t;
+    box.appendChild(p);
+  });
+  const p = document.createElement('div');
+  const a = document.createElement('a');
+  a.href = REPO_URL;
+  a.target = '_blank';
+  a.rel = 'noopener';
+  a.textContent = 'Datenrepository auf GitHub öffnen';
+  p.appendChild(a);
+  box.appendChild(p);
+}
+
+/* ==========================================================================
+   6 — Start
+   ========================================================================== */
+function fatal(err) {
+  const main = $('#main');
+  main.textContent = '';
+  let title = 'Die Daten konnten nicht geladen werden.';
+  let detail = err.message;
+  if (err.message === 'RATE_LIMIT') {
+    title = 'GitHub-Zugriffslimit erreicht.';
+    detail = 'Die GitHub-API erlaubt ohne Anmeldung 60 Anfragen pro Stunde und IP-Adresse. Bitte in einigen Minuten erneut laden.';
+  } else if (err.message === 'NO_VERSIONS') {
+    title = 'Keine Versionsordner gefunden.';
+    detail = `Im Repository ${CONFIG.owner}/${CONFIG.repo} liegt kein Ordner, dessen Name mit V und einer Zahl beginnt (z. B. „V1“).`;
+  } else if (err.message.startsWith('NOT_FOUND')) {
+    title = 'Repository oder Ordner nicht gefunden.';
+    detail = `Nicht gefunden: ${err.message.split(':')[1]} in ${CONFIG.owner}/${CONFIG.repo}. Ist das Repository öffentlich?`;
+  }
+  main.appendChild(errorBox(title, detail));
+}
+
+async function init() {
+  renderIntro();
+  const main = $('#main');
+  try {
+    await loadIndex();
+    const usable = DATA.versions.filter((v) => !v.error && v.datasets.length);
+    if (!usable.length) throw new Error(DATA.versions[0] && DATA.versions[0].error ? DATA.versions[0].error : 'NO_VERSIONS');
+    STATE.selected = new Set([usable[usable.length - 1].id]);
+    main.dataset.ready = 'true';
+    renderAll();
+    const errs = DATA.versions.filter((v) => v.error);
+    if (errs.length) {
+      const box = $('#warnings');
+      errs.forEach((v) => box.appendChild(errorBox(`Version ${v.id} übersprungen`, v.error)));
+    }
+  } catch (e) {
+    fatal(e);
+  }
+}
+
+let rt = null;
+window.addEventListener('resize', () => {
+  clearTimeout(rt);
+  rt = setTimeout(() => { if ($('#main').dataset.ready === 'true') renderAll(); }, 200);
+});
+
+document.addEventListener('DOMContentLoaded', init);

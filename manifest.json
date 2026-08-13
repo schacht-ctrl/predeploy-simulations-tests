@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "generated": "2026-08-13T07:30:15+00:00",
+  "versions": [
+    {
+      "id": "V1",
+      "folder": "V1",
+      "files": [
+        {
+          "name": "V1_runs__surfers-immo-cal-telemail-v2-hangup-7dc45ddf.csv",
+          "path": "V1/V1_runs__surfers-immo-cal-telemail-v2-hangup-7dc45ddf.csv",
+          "sha": "210b66123c9c87198990c3c3030b136c1981f278",
+          "size": 405578
+        },
+        {
+          "name": "V1_runs__surfers-immo-cal-telemail-v2-hangup-multiinfo-81b3347a.csv",
+          "path": "V1/V1_runs__surfers-immo-cal-telemail-v2-hangup-multiinfo-81b3347a.csv",
+          "sha": "181b188330d8d6d28525127620ef8a58e6309869",
+          "size": 313506
+        },
+        {
+          "name": "V1_runs__surfers-immo-cal-telonly-v2-hangup-d423ac44.csv",
+          "path": "V1/V1_runs__surfers-immo-cal-telonly-v2-hangup-d423ac44.csv",
+          "sha": "89c1b20a660274b8bc5c1da5430959adcca487d3",
+          "size": 327009
+        },
+        {
+          "name": "V1_runs__surfers-immo-cal-telonly-v2-hangup-multiinfo-df7dc3e5.csv",
+          "path": "V1/V1_runs__surfers-immo-cal-telonly-v2-hangup-multiinfo-df7dc3e5.csv",
+          "sha": "109d1f6d2ce94f4d18a0efd02c8d4c1b8967bf16",
+          "size": 311587
+        },
+        {
+          "name": "V1_runs__surfers-immo-callback-v2-20151f52.csv",
+          "path": "V1/V1_runs__surfers-immo-callback-v2-20151f52.csv",
+          "sha": "77c006c71f7875f31fc931af868c69f3e06bd8ae",
+          "size": 211332
+        },
+        {
+          "name": "V1_runs__surfers-immo-nocal-v2-hangup-56eb7e8c.csv",
+          "path": "V1/V1_runs__surfers-immo-nocal-v2-hangup-56eb7e8c.csv",
+          "sha": "c600f180a252ba66b7e8f95dcc5bfa1d1d9950ab",
+          "size": 435413
+        },
+        {
+          "name": "V1_runs__surfers-immo-nocal-v2-hangup-multiinfo-c2ca26cd.csv",
+          "path": "V1/V1_runs__surfers-immo-nocal-v2-hangup-multiinfo-c2ca26cd.csv",
+          "sha": "ed7573c1191174950c0100590d8ce44d217bb1c5",
+          "size": 443659
+        },
+        {
+          "name": "V1_summary.csv",
+          "path": "V1/V1_summary.csv",
+          "sha": "4e0c99efd75faad74cb6d3e7c9c88284cc999dd6",
+          "size": 3123
+        }
+      ]
+    }
+  ]
+}

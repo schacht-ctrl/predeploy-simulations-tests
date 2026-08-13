@@ -1,0 +1,41 @@
+name: manifest aktualisieren
+
+# Hält manifest.json synchron mit den Versionsordnern. Das Dashboard liest das
+# Manifest statt eines Verzeichnislistings der GitHub-API – neue Daten sind
+# dadurch ohne Zugriffslimit und ohne erneutes Deployment sichtbar.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'V*/**'
+      - 'scripts/build_manifest.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: manifest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: manifest.json erzeugen
+        run: python3 scripts/build_manifest.py
+
+      - name: Änderung committen
+        run: |
+          if [ -z "$(git status --porcelain manifest.json)" ]; then
+            echo "Keine Änderung an manifest.json."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git commit -m "manifest.json aktualisiert [skip ci]"
+          git push

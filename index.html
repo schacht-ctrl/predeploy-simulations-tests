@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pre-Deploy Simulations Tests · Surfers Immobilien</title>
+<meta name="description" content="Ergebnisse der LangSmith-Simulationsexperimente für die digitale Anruf-Assistentin von Surfers Immobilien.">
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23DEFF00'/%3E%3Ccircle cx='10' cy='16' r='3' fill='%23202020'/%3E%3Ccircle cx='19' cy='11' r='3' fill='%23202020'/%3E%3Ccircle cx='24' cy='21' r='3' fill='%23202020'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <span class="brandmark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none">
+        <circle cx="5" cy="16" r="2.6" fill="#202020"/>
+        <circle cx="12" cy="9" r="2.6" fill="#202020"/>
+        <circle cx="19" cy="13" r="2.6" fill="#202020"/>
+      </svg>
+    </span>
+    <div>
+      <h1>Pre-Deploy Simulations Tests</h1>
+      <div class="sub">Simulierte Telefonate mit der digitalen Anruf-Assistentin von Surfers Immobilien</div>
+    </div>
+  </div>
+</header>
+
+<div class="filterbar">
+  <div class="filterbar-inner">
+    <span class="filter-label" id="vlabel">Agenten-Version</span>
+    <div class="chipset" id="version-chips" role="group" aria-labelledby="vlabel"></div>
+    <span class="filter-note" id="filter-note"></span>
+  </div>
+</div>
+
+<div class="wrap">
+  <div id="warnings"></div>
+
+  <main id="main">
+    <section id="kpi-section">
+      <div class="section-head">
+        <div class="eyebrow">Umfang der Testreihe</div>
+        <h2>Was in dieser Auswertung steckt</h2>
+        <p>Jeder Datensatz umfasst 100 vollständig simulierte Telefonate zwischen der deployten Assistenz und einer simulierten anrufenden Person.</p>
+      </div>
+      <div id="kpis">
+        <div class="state"><span class="loading"><span class="spinner"></span>Ergebnisdaten werden aus dem Datenrepository geladen …</span></div>
+      </div>
+    </section>
+
+    <section id="intro-section">
+      <div class="section-head">
+        <div class="eyebrow">Hintergrund</div>
+        <h2>Genossenschaft, Anrufende und Versuchsaufbau</h2>
+      </div>
+      <div id="intro"></div>
+    </section>
+
+    <section id="aggregate-section">
+      <div class="section-head">
+        <div class="eyebrow">Ergebnisse pro Version</div>
+        <h2>Metriken über alle Szenarien</h2>
+        <p>Gesamtbild je Agenten-Version: jede Metrik über alle Datensätze zusammengefasst, in denen sie erhoben wurde.</p>
+      </div>
+      <div id="aggregate"></div>
+    </section>
+
+    <section id="scenario-section">
+      <div class="section-head">
+        <div class="eyebrow">Ergebnisse pro Szenario</div>
+        <h2>Aufgeteilt nach Call-Szenario</h2>
+        <p>Dieselben Metriken, getrennt nach dem Anliegen der anrufenden Person. Eine Szenario-Karte anklicken, um die Sub-Szenarien zu öffnen – dort führt jede Metrik zur Verteilung über die einzelnen Anrufe und zu Beispielgesprächen.</p>
+      </div>
+      <div id="scenarios"></div>
+      <div id="scenario-detail"></div>
+    </section>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="inner" id="foot"></div>
+</footer>
+
+<script src="assets/content.js"></script>
+<script src="assets/charts.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
