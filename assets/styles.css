@@ -170,11 +170,36 @@ section { margin-bottom: 44px; }
 .kpi-version .swatch { width: 10px; height: 10px; border-radius: 50%; }
 .kpi-row {
   display: grid; gap: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
 }
 .kpi {
   background: var(--surface); border: 1px solid var(--line-2);
   border-radius: var(--radius-sm); padding: 14px 16px;
+}
+button.kpi-clickable {
+  font: inherit; text-align: left; cursor: pointer; color: inherit;
+  display: block; width: 100%;
+  transition: border-color .12s, box-shadow .12s;
+}
+button.kpi-clickable:hover { border-color: var(--line-3); box-shadow: var(--shadow); }
+button.kpi-clickable[data-open="true"] { border-color: var(--ink); }
+.kpi .k-more {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700; color: var(--ink-2); margin-top: 9px;
+}
+.kpi .k-more .caret {
+  width: 6px; height: 6px;
+  border-right: 1.5px solid var(--ink-2); border-bottom: 1.5px solid var(--ink-2);
+  transform: rotate(45deg) translateY(-2px); transition: transform .15s;
+}
+button.kpi-clickable[data-open="true"] .k-more { color: var(--ink); }
+button.kpi-clickable[data-open="true"] .k-more .caret {
+  transform: rotate(-135deg) translateY(-2px);
+  border-color: var(--ink);
+}
+.swatch-inline {
+  display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  margin-right: 6px; vertical-align: baseline;
 }
 .kpi .k-label { font-size: 12px; color: var(--ink-2); }
 .kpi .k-value {
@@ -186,7 +211,7 @@ section { margin-bottom: 44px; }
 /* --- Info-Akkordeon ----------------------------------------------------- */
 .intro-grid {
   display: grid; gap: 12px; align-items: start;
-  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr));
 }
 details.info {
   background: var(--surface); border: 1px solid var(--line-2);
@@ -260,7 +285,10 @@ table.data .grp td {
 }
 
 /* --- Szenario-Karten (klickbar) ---------------------------------------- */
-.scenario-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
+.scenario-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); }
+/* Im Versionsvergleich brauchen die Wertespalten Platz: Karten erst ab sehr
+   breiten Bildschirmen nebeneinander, sonst volle Breite. */
+.scenario-grid[data-multi="true"] { grid-template-columns: repeat(auto-fit, minmax(min(640px, 100%), 1fr)); }
 .scenario-card { display: flex; flex-direction: column; }
 .scenario-card .card-head { cursor: pointer; }
 .scenario-card .card-head:hover { background: var(--surface-sunken); }
@@ -327,9 +355,11 @@ table.data .grp td {
 }
 .tag.multi { background: var(--lime-90); color: var(--lime-4); }
 .tag.cal { background: var(--blue-90); color: #0046D2; }
+.tag.pending { background: #FFF3D6; color: #986F00; }
 
 /* --- Metrik-Panels im Szenario-Detail ---------------------------------- */
-.metric-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+.metric-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }
+.metric-grid[data-multi="true"] { grid-template-columns: repeat(auto-fit, minmax(min(660px, 100%), 1fr)); }
 .metric-panel {
   border: 1px solid var(--line-2); border-radius: var(--radius-sm);
   background: var(--surface); overflow: hidden;
@@ -363,7 +393,7 @@ table.data .grp td {
   color: var(--ink-2); margin: 22px 0 10px;
 }
 .metric-detail h5:first-child { margin-top: 0; }
-.steckbrief { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.steckbrief { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
 .sb {
   background: var(--surface); border: 1px solid var(--line-2);
   border-radius: var(--radius-sm); padding: 11px 13px;
@@ -377,7 +407,7 @@ table.data .grp td {
 }
 
 /* --- Verteilungen: Punktraster ---------------------------------------- */
-.waffle-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); }
+.waffle-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(215px, 100%), 1fr)); }
 .waffle-card {
   background: var(--surface); border: 1px solid var(--line-2);
   border-radius: var(--radius-sm); padding: 13px 14px 12px;
@@ -389,7 +419,7 @@ table.data .grp td {
 }
 .waffle-card .w-value span { font-size: 12px; font-weight: 400; color: var(--ink-2); margin-left: 6px; letter-spacing: 0; }
 .waffle-card svg { margin-top: 9px; }
-.hist-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.hist-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); }
 
 /* --- Beispielgespräche ------------------------------------------------- */
 .example-controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
@@ -398,7 +428,7 @@ select.sel, .example-controls select {
   border: 1px solid var(--line-2); border-radius: var(--radius-sm);
   background: var(--surface); color: var(--ink); cursor: pointer; max-width: 100%;
 }
-.transcript-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+.transcript-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(330px, 100%), 1fr)); }
 .transcript {
   background: var(--surface); border: 1px solid var(--line-2);
   border-radius: var(--radius-sm); overflow: hidden;

@@ -1,58 +1,112 @@
 {
-  "schema": 1,
-  "generated": "2026-08-13T07:30:15+00:00",
+  "schema": 2,
+  "generated": "2026-08-17T17:49:16+00:00",
   "versions": [
     {
-      "id": "V1",
-      "folder": "V1",
+      "id": "V1 OpenAI",
+      "folder": "V1 OpenAI",
       "files": [
         {
-          "name": "V1_runs__surfers-immo-cal-telemail-v2-hangup-7dc45ddf.csv",
-          "path": "V1/V1_runs__surfers-immo-cal-telemail-v2-hangup-7dc45ddf.csv",
-          "sha": "210b66123c9c87198990c3c3030b136c1981f278",
-          "size": 405578
+          "name": "runs__surfers-immo-cal-telemail-v2-hangup-51dd4877.csv",
+          "path": "V1 OpenAI/runs__surfers-immo-cal-telemail-v2-hangup-51dd4877.csv",
+          "sha": "f38ebd7ded0d31184e0d6f66739725eb14bfbbeb",
+          "size": 419925
         },
         {
-          "name": "V1_runs__surfers-immo-cal-telemail-v2-hangup-multiinfo-81b3347a.csv",
-          "path": "V1/V1_runs__surfers-immo-cal-telemail-v2-hangup-multiinfo-81b3347a.csv",
-          "sha": "181b188330d8d6d28525127620ef8a58e6309869",
-          "size": 313506
+          "name": "runs__surfers-immo-cal-telemail-v2-hangup-multiinfo-8cebfc8c.csv",
+          "path": "V1 OpenAI/runs__surfers-immo-cal-telemail-v2-hangup-multiinfo-8cebfc8c.csv",
+          "sha": "46cc9cf8c86eefb933323466066276afde759655",
+          "size": 387463
         },
         {
-          "name": "V1_runs__surfers-immo-cal-telonly-v2-hangup-d423ac44.csv",
-          "path": "V1/V1_runs__surfers-immo-cal-telonly-v2-hangup-d423ac44.csv",
-          "sha": "89c1b20a660274b8bc5c1da5430959adcca487d3",
-          "size": 327009
+          "name": "runs__surfers-immo-cal-telonly-v2-hangup-e13ebb67.csv",
+          "path": "V1 OpenAI/runs__surfers-immo-cal-telonly-v2-hangup-e13ebb67.csv",
+          "sha": "53c37f285209e36181e375b640c57834d8242f93",
+          "size": 425603
         },
         {
-          "name": "V1_runs__surfers-immo-cal-telonly-v2-hangup-multiinfo-df7dc3e5.csv",
-          "path": "V1/V1_runs__surfers-immo-cal-telonly-v2-hangup-multiinfo-df7dc3e5.csv",
-          "sha": "109d1f6d2ce94f4d18a0efd02c8d4c1b8967bf16",
-          "size": 311587
+          "name": "runs__surfers-immo-cal-telonly-v2-hangup-multiinfo-df986b73.csv",
+          "path": "V1 OpenAI/runs__surfers-immo-cal-telonly-v2-hangup-multiinfo-df986b73.csv",
+          "sha": "1f413b2a738aee06e8b3eccab8cce2845fc3c719",
+          "size": 400425
         },
         {
-          "name": "V1_runs__surfers-immo-callback-v2-20151f52.csv",
-          "path": "V1/V1_runs__surfers-immo-callback-v2-20151f52.csv",
-          "sha": "77c006c71f7875f31fc931af868c69f3e06bd8ae",
-          "size": 211332
+          "name": "runs__surfers-immo-callback-v2-ca0bbda7.csv",
+          "path": "V1 OpenAI/runs__surfers-immo-callback-v2-ca0bbda7.csv",
+          "sha": "6260ee8a45136047cc101584831c5c8be07813b7",
+          "size": 157170
         },
         {
-          "name": "V1_runs__surfers-immo-nocal-v2-hangup-56eb7e8c.csv",
-          "path": "V1/V1_runs__surfers-immo-nocal-v2-hangup-56eb7e8c.csv",
-          "sha": "c600f180a252ba66b7e8f95dcc5bfa1d1d9950ab",
-          "size": 435413
+          "name": "runs__surfers-immo-nocal-v2-hangup-11fdcf68.csv",
+          "path": "V1 OpenAI/runs__surfers-immo-nocal-v2-hangup-11fdcf68.csv",
+          "sha": "fff938cd8e45631f685a0e32984f5dd71d920b34",
+          "size": 249717
         },
         {
-          "name": "V1_runs__surfers-immo-nocal-v2-hangup-multiinfo-c2ca26cd.csv",
-          "path": "V1/V1_runs__surfers-immo-nocal-v2-hangup-multiinfo-c2ca26cd.csv",
-          "sha": "ed7573c1191174950c0100590d8ce44d217bb1c5",
-          "size": 443659
+          "name": "runs__surfers-immo-nocal-v2-hangup-multiinfo-f14cc29f.csv",
+          "path": "V1 OpenAI/runs__surfers-immo-nocal-v2-hangup-multiinfo-f14cc29f.csv",
+          "sha": "bf92eac5c3dc096f10b2185ce407319e5cfcb34c",
+          "size": 250876
         },
         {
-          "name": "V1_summary.csv",
-          "path": "V1/V1_summary.csv",
-          "sha": "4e0c99efd75faad74cb6d3e7c9c88284cc999dd6",
-          "size": 3123
+          "name": "runs__surfers-immo-techsupport_answerable_V1-2749ec98.csv",
+          "path": "V1 OpenAI/runs__surfers-immo-techsupport_answerable_V1-2749ec98.csv",
+          "sha": "67cb671c171f29a152167f15238da4ee8f5ec48d",
+          "size": 144962
+        },
+        {
+          "name": "runs__surfers-immo-techsupport_unanswerable_V1-8ac6f6c3.csv",
+          "path": "V1 OpenAI/runs__surfers-immo-techsupport_unanswerable_V1-8ac6f6c3.csv",
+          "sha": "6ce2f9e14a2cb61d3b18588775f7ad6deab77b80",
+          "size": 141564
+        },
+        {
+          "name": "summary.csv",
+          "path": "V1 OpenAI/summary.csv",
+          "sha": "0f753f1e999a74002106d1376241846b17299457",
+          "size": 4164
+        }
+      ]
+    },
+    {
+      "id": "V1 SipgateAI",
+      "folder": "V1 SipgateAI",
+      "files": [
+        {
+          "name": "runs__surfers-immo-callback_V1_sigateai-f238efbf.csv",
+          "path": "V1 SipgateAI/runs__surfers-immo-callback_V1_sigateai-f238efbf.csv",
+          "sha": "9b7e6a3a653a5e2bb3069af21e578f660cb4aca3",
+          "size": 128539
+        },
+        {
+          "name": "runs__surfers-immo-nocal-v2-hangup-multiinfo_V1_sigateai-9feebcf0.csv",
+          "path": "V1 SipgateAI/runs__surfers-immo-nocal-v2-hangup-multiinfo_V1_sigateai-9feebcf0.csv",
+          "sha": "bac9e51a1d8b1fb35977c82ce22f909e4b6e2d48",
+          "size": 174129
+        },
+        {
+          "name": "runs__surfers-immo-nocal-v2-hangup_V1_sigateai-6fa5b5c9.csv",
+          "path": "V1 SipgateAI/runs__surfers-immo-nocal-v2-hangup_V1_sigateai-6fa5b5c9.csv",
+          "sha": "4eb891fcff0e8ac83d0aaae83f93bf750b0d7b3b",
+          "size": 173192
+        },
+        {
+          "name": "runs__surfers-immo-techsupport_answerable_V1_sigateai-ed80438c.csv",
+          "path": "V1 SipgateAI/runs__surfers-immo-techsupport_answerable_V1_sigateai-ed80438c.csv",
+          "sha": "6533dbd2ef8f15ac1377c453710ca2a8de0f1256",
+          "size": 131439
+        },
+        {
+          "name": "runs__surfers-immo-techsupport_unanswerable_V1_sigateai-84fca4e3.csv",
+          "path": "V1 SipgateAI/runs__surfers-immo-techsupport_unanswerable_V1_sigateai-84fca4e3.csv",
+          "sha": "680d5e05a23591162864ef8272686466fff51b9a",
+          "size": 125730
+        },
+        {
+          "name": "summary.csv",
+          "path": "V1 SipgateAI/summary.csv",
+          "sha": "6f341e972f27bc4832a4dcd18ea201b1e1071b00",
+          "size": 4263
         }
       ]
     }

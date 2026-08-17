@@ -20,8 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION_DIR = re.compile(r"^[Vv]\d+")
 OUT = ROOT / "manifest.json"
+
+# Jeder Ordner im Repo-Root mit mindestens einer CSV-Datei ist eine Version.
+# Der Ordnername ist zugleich die Versionsbezeichnung im Dashboard – inklusive
+# Leerzeichen und Zusätzen, z. B. "V1 OpenAI". Nur die Infrastrukturordner des
+# Dashboards sind ausgenommen.
+IGNORED_DIRS = {"assets", "scripts", "node_modules", ".github", ".git", ".netlify"}
 
 
 def git_blob_sha(path: Path) -> str:
@@ -34,14 +39,26 @@ def git_blob_sha(path: Path) -> str:
 
 
 def version_sort_key(name: str):
-    m = re.search(r"\d+", name)
-    return (int(m.group()) if m else 10**6, name)
+    """Nach führender Versionsnummer, danach alphabetisch.
+
+    So behalten bestehende Versionen ihre Position (und damit ihre Farbe im
+    Dashboard), wenn später neue Versionen dazukommen.
+    """
+    m = re.match(r"\s*[Vv]?(\d+)", name)
+    return (int(m.group(1)) if m else 10**6, name.casefold(), name)
+
+
+def is_version_dir(p: Path) -> bool:
+    if not p.is_dir():
+        return False
+    if p.name in IGNORED_DIRS or p.name.startswith("."):
+        return False
+    return True
 
 
 def build() -> dict:
     versions = []
-    for d in sorted((p for p in ROOT.iterdir() if p.is_dir() and VERSION_DIR.match(p.name)),
-                    key=lambda p: version_sort_key(p.name)):
+    for d in sorted((p for p in ROOT.iterdir() if is_version_dir(p)), key=lambda p: version_sort_key(p.name)):
         files = []
         for f in sorted(d.glob("*.csv")):
             files.append({
@@ -51,11 +68,15 @@ def build() -> dict:
                 "size": f.stat().st_size,
             })
         if not files:
-            print(f"Hinweis: Ordner {d.name} enthält keine CSV-Dateien – wird übersprungen.")
+            print(f"Hinweis: Ordner „{d.name}“ enthält keine CSV-Dateien – wird übersprungen.")
             continue
-        versions.append({"id": d.name.upper(), "folder": d.name, "files": files})
+        if not any(re.search(r"summary", f["name"], re.I) for f in files):
+            print(f"Warnung: Ordner „{d.name}“ enthält keine Summary-Datei – "
+                  f"das Dashboard kann diese Version nicht auswerten.")
+        # id = Ordnername unverändert: er ist die Versionsbezeichnung
+        versions.append({"id": d.name, "folder": d.name, "files": files})
     return {
-        "schema": 1,
+        "schema": 2,
         "generated": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "versions": versions,
     }

@@ -8,13 +8,21 @@ const CONFIG = {
   owner: 'schacht-ctrl',
   repo: 'predeploy-simulations-tests',
   branch: 'main',
-  // Jeder Ordner im Repo-Root, der hierauf passt, ist eine Agenten-Version
-  versionPattern: /^[Vv]\d+/,
+  // Jeder Ordner im Repo-Root ist eine Agenten-Version; sein vollständiger
+  // Name ist die Versionsbezeichnung (z. B. „V1 OpenAI“). Nur die
+  // Infrastrukturordner des Dashboards sind ausgenommen.
+  ignoreDirs: ['assets', 'scripts', 'node_modules', '.github', '.git', '.netlify'],
 };
 
 const GH_API = `https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}/contents`;
 const GH_RAW = `https://raw.githubusercontent.com/${CONFIG.owner}/${CONFIG.repo}/${CONFIG.branch}`;
 const REPO_URL = `https://github.com/${CONFIG.owner}/${CONFIG.repo}`;
+
+/* Mit „?source=local“ werden manifest.json und die CSV-Dateien relativ zur
+   Seite geladen statt aus dem GitHub-Repository. Gedacht zum Entwickeln und
+   Prüfen neuer Daten, bevor sie gepusht sind. Standard ist immer GitHub.    */
+const LOCAL_SOURCE = new URLSearchParams(location.search).get('source') === 'local';
+const DATA_BASE = LOCAL_SOURCE ? '.' : GH_RAW;
 
 /* ==========================================================================
    1 — Parser
@@ -167,17 +175,18 @@ const DATA = { versions: [], byVersion: new Map(), source: null, generated: null
 /* Bevorzugt: manifest.json aus dem Repo (kein API-Limit, funktioniert auch
    dort, wo api.github.com blockiert ist). Fallback: Contents-API.          */
 async function loadManifestIndex() {
-  const res = await fetch(`${GH_RAW}/manifest.json?t=${Date.now()}`, { cache: 'no-store' });
+  const res = await fetch(`${DATA_BASE}/manifest.json?t=${Date.now()}`, { cache: 'no-store' });
   if (!res.ok) throw new Error(`MANIFEST_${res.status}`);
   const m = await res.json();
   if (!m || !Array.isArray(m.versions) || !m.versions.length) throw new Error('MANIFEST_EMPTY');
   DATA.generated = m.generated || null;
   return m.versions.map((v) => {
     const files = (v.files || []).map((f) => ({
-      name: f.name, path: f.path, sha: f.sha, url: `${GH_RAW}/${f.path.split('/').map(encodeURIComponent).join('/')}`,
+      name: f.name, path: f.path, sha: f.sha, url: `${DATA_BASE}/${f.path.split('/').map(encodeURIComponent).join('/')}`,
     }));
     return {
-      id: (v.id || v.folder || '').toUpperCase(),
+      // Versionsbezeichnung = Ordnername, unverändert
+      id: v.id || v.folder || '',
       folder: v.folder || v.id,
       summary: files.find((f) => /summary/i.test(f.name)),
       runsFiles: files.filter((f) => /runs/i.test(f.name)),
@@ -189,19 +198,19 @@ async function loadManifestIndex() {
 async function loadApiIndex() {
   const root = await ghList('');
   const dirs = root
-    .filter((e) => e.type === 'dir' && CONFIG.versionPattern.test(e.name))
-    .sort((a, b) => {
-      const na = parseInt(/\d+/.exec(a.name)[0], 10), nb = parseInt(/\d+/.exec(b.name)[0], 10);
-      return na - nb || a.name.localeCompare(b.name, 'de');
-    });
+    .filter((e) => e.type === 'dir'
+      && CONFIG.ignoreDirs.indexOf(e.name) === -1
+      && e.name.charAt(0) !== '.')
+    .sort((a, b) => compareVersions(a.name, b.name));
   if (!dirs.length) throw new Error('NO_VERSIONS');
   const versions = [];
   for (const dir of dirs) {
-    const files = (await ghList(dir.name))
+    const files = (await ghList(encodeURIComponent(dir.name)))
       .filter((f) => f.type === 'file' && /\.csv$/i.test(f.name))
       .map((f) => ({ name: f.name, path: f.path, sha: f.sha, url: f.download_url }));
+    if (!files.length) continue;
     versions.push({
-      id: dir.name.toUpperCase(), folder: dir.name,
+      id: dir.name, folder: dir.name,
       summary: files.find((f) => /summary/i.test(f.name)),
       runsFiles: files.filter((f) => /runs/i.test(f.name)),
       datasets: [],
@@ -210,23 +219,38 @@ async function loadApiIndex() {
   return versions;
 }
 
+/* Farbzuordnung: fest über die sortierte Reihenfolge der Versionsordner */
+const VERSION_COLORS = new Map();
+function assignVersionColors(versions) {
+  VERSION_COLORS.clear();
+  versions.forEach((v, i) => {
+    const override = VERSION_COLOR_OVERRIDES[v.id];
+    VERSION_COLORS.set(v.id, override || VERSION_SLOTS[i] || VERSION_FALLBACK);
+  });
+}
+function versionColor(id) {
+  return VERSION_COLORS.get(id) || VERSION_FALLBACK;
+}
+
 async function loadIndex() {
   let versions;
-  try {
+  if (LOCAL_SOURCE) {
     versions = await loadManifestIndex();
-    DATA.source = 'manifest';
-  } catch (e) {
-    versions = await loadApiIndex();
-    DATA.source = 'api';
+    DATA.source = 'local';
+  } else {
+    try {
+      versions = await loadManifestIndex();
+      DATA.source = 'manifest';
+    } catch (e) {
+      versions = await loadApiIndex();
+      DATA.source = 'api';
+    }
   }
   const seen = new Set();
   versions = versions.filter((v) => v.id && !seen.has(v.id) && seen.add(v.id));
-  versions.sort((a, b) => {
-    const na = parseInt((/\d+/.exec(a.id) || [1e6])[0], 10);
-    const nb = parseInt((/\d+/.exec(b.id) || [1e6])[0], 10);
-    return na - nb || a.id.localeCompare(b.id, 'de');
-  });
+  versions.sort((a, b) => compareVersions(a.id, b.id));
   if (!versions.length) throw new Error('NO_VERSIONS');
+  assignVersionColors(versions);
   DATA.versions = versions;
 
   for (const v of versions) {
@@ -254,6 +278,10 @@ function buildDataset(row, version) {
     if (scores[k].avg === null) delete scores[k];
   });
   const info = datasetInfo(row.dataset);
+  // Nicht auswertbare Metriken dieses Datensatzes gar nicht übernehmen
+  Object.keys(scores).forEach((k) => {
+    if (!metricApplies(k, row.dataset, info)) delete scores[k];
+  });
   const runsFile = version.runsFiles.find((f) => row.experiment && f.name.indexOf(row.experiment) !== -1);
   return {
     version: version.id,
@@ -273,7 +301,9 @@ function buildDataset(row, version) {
     info,
     scenario: info.scenario,
     runsFile,
+    hasRuns: !!runsFile,   // Runs-Datei können nachgeliefert werden
     runs: null,
+    turnStats: null,
   };
 }
 
@@ -298,10 +328,20 @@ async function loadRuns(ds) {
       inputs,
       feedback,
       executionTime: num(r.execution_time),
+      // Turn-Kennzahlen (in älteren Exporten nicht enthalten)
+      assistantTurns: num(r.assistant_turns),
+      totalTurns: num(r.total_turns),
+      avgTurnDuration: num(r.avg_turn_duration),
       error: r.error || '',
       trajectoryRaw: r['outputs.trajectory'] || '',
     };
   });
+  ds.turnStats = {
+    assistantTurns: stats(ds.runs.map((r) => r.assistantTurns)),
+    totalTurns: stats(ds.runs.map((r) => r.totalTurns)),
+    avgTurnDuration: stats(ds.runs.map((r) => r.avgTurnDuration)),
+    executionTime: stats(ds.runs.map((r) => r.executionTime)),
+  };
   return ds.runs;
 }
 
@@ -323,7 +363,8 @@ function unionDatasets(versions, scenarioId) {
   }));
   return [...seen.values()];
 }
-/* Gewichtetes Mittel über Datensätze (Gewicht = Anzahl bewerteter Anrufe) */
+/* Gewichtetes Mittel über Datensätze (Gewicht = Anzahl bewerteter Anrufe).
+   Nicht auswertbare Kombinationen sind in d.scores bereits entfernt.        */
 function pooled(datasets, metricKey) {
   let sum = 0, n = 0, used = 0;
   datasets.forEach((d) => {
@@ -333,6 +374,10 @@ function pooled(datasets, metricKey) {
     sum += s.avg * w; n += w; used++;
   });
   return n ? { avg: sum / n, n, datasets: used } : null;
+}
+/* Datensätze, in denen die Metrik erhoben und auswertbar ist */
+function datasetsWithMetric(datasets, metricKey) {
+  return datasets.filter((d) => d.scores[metricKey] && d.scores[metricKey].avg !== null);
 }
 function metricsIn(datasets) {
   const set = new Set();
@@ -358,10 +403,11 @@ function scenarioOf(id) { return SCENARIOS.find((s) => s.id === id); }
    ========================================================================== */
 const STATE = {
   selected: new Set(),
+  openKpi: null,           // Kennzahl-ID der geöffneten Aufschlüsselung
   openScenario: null,
   openMetric: {},          // scenarioId → metricKey
   tables: new Set(),       // Chart-IDs mit Tabellenansicht
-  exampleDataset: {},      // "scenario::metric" → dataset-Name
+  exampleDataset: {},      // "scenario::metric" → dataset-Key
 };
 
 /* ==========================================================================
@@ -372,6 +418,7 @@ const $ = (sel) => document.querySelector(sel);
 function renderAll() {
   renderFilterbar();
   renderKpis();
+  renderKpiDetail();
   renderAggregate();
   renderScenarios();
   renderScenarioDetail();
@@ -410,13 +457,86 @@ function renderFilterbar() {
     : 'Weitere Versionen erscheinen automatisch, sobald ein neuer Versionsordner im Datenrepository liegt.';
 }
 
-function kpiTile(label, value, hint) {
-  const d = document.createElement('div');
-  d.className = 'kpi';
-  const l = document.createElement('div'); l.className = 'k-label'; l.textContent = label;
+/* --- Kennzahlen: Werte je Datensatzmenge ------------------------------- */
+function measureValue(field, datasets) {
+  const calls = datasets.reduce((a, d) => a + (d.runCount || 0), 0);
+  const wmean = (get) => {
+    let s = 0, w = 0;
+    datasets.forEach((d) => {
+      const v = get(d);
+      if (v === null || v === undefined || Number.isNaN(v)) return;
+      const k = d.runCount || 0;
+      s += v * k; w += k;
+    });
+    return w ? s / w : null;
+  };
+  switch (field) {
+    case 'calls': return calls;
+    case 'datasets': return datasets.length;
+    case 'metrics': return metricsIn(datasets).length;
+    case 'errorRate': return wmean((d) => d.errorRate);
+    case 'latencyP50': return wmean((d) => d.latencyP50);
+    case 'cost': return datasets.reduce((a, d) => a + (d.cost || 0), 0);
+    case 'tokens': return datasets.reduce((a, d) => a + (d.tokens || 0), 0);
+    case 'costPerCall': return calls ? datasets.reduce((a, d) => a + (d.cost || 0), 0) / calls : null;
+    case 'tokensPerCall': return calls ? datasets.reduce((a, d) => a + (d.tokens || 0), 0) / calls : null;
+    // Turn-Kennzahlen: nur aus Datensätzen mit geladener Runs-Datei
+    case 'assistantTurns': return wmean((d) => d.turnStats && d.turnStats.assistantTurns.mean);
+    case 'totalTurns': return wmean((d) => d.turnStats && d.turnStats.totalTurns.mean);
+    case 'avgTurnDuration': return wmean((d) => d.turnStats && d.turnStats.avgTurnDuration.mean);
+    default: return null;
+  }
+}
+
+const MEASURE_FORMATS = {
+  int: (v) => fmtInt(v),
+  pct: (v) => fmtPct(v, 1),
+  sec: (v) => (v === null || v === undefined || Number.isNaN(v) ? '–' : fmtNum(v, 1) + ' s'),
+  sec2: (v) => (v === null || v === undefined || Number.isNaN(v) ? '–' : fmtNum(v, 2) + ' s'),
+  num1: (v) => fmtNum(v, 1),
+  usd: (v) => (v === null || v === undefined || Number.isNaN(v) ? '–' : fmtNum(v, 2) + ' $'),
+  usd4: (v) => (v === null || v === undefined || Number.isNaN(v) ? '–' : fmtNum(v, 4) + ' $'),
+};
+/* Kompakte Variante für Achsenbeschriftungen. Die Nachkommastellen richten
+   sich nach der Achsenobergrenze, damit alle Marken gleich formatiert sind.  */
+const MEASURE_AXIS_FORMATS = {
+  int: (v) => fmtInt(v),
+  pct: (v) => fmtPct(v, 0),
+  sec: (v, max) => fmtNum(v, max >= 10 ? 0 : 1) + ' s',
+  sec2: (v, max) => fmtNum(v, max >= 10 ? 0 : 1) + ' s',
+  num1: (v, max) => fmtNum(v, max >= 10 ? 0 : 1),
+  usd: (v, max) => fmtNum(v, max >= 10 ? 0 : max >= 1 ? 1 : 2) + ' $',
+  usd4: (v, max) => fmtNum(v, max >= 1 ? 2 : max >= 0.1 ? 2 : 3) + ' $',
+};
+const fmtMeasure = (kind, v) => (MEASURE_FORMATS[kind] || MEASURE_FORMATS.int)(v);
+const fmtMeasureAxis = (kind, v, max) => (MEASURE_AXIS_FORMATS[kind] || MEASURE_AXIS_FORMATS.int)(v, max || 0);
+
+function kpiTile(measure, value, hint) {
+  const d = document.createElement('button');
+  d.className = 'kpi kpi-clickable';
+  d.type = 'button';
+  const isOpen = STATE.openKpi === measure.id;
+  d.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  if (isOpen) d.dataset.open = 'true';
+  const l = document.createElement('div'); l.className = 'k-label'; l.textContent = measure.label;
   const v = document.createElement('div'); v.className = 'k-value'; v.textContent = value;
   d.appendChild(l); d.appendChild(v);
   if (hint) { const h = document.createElement('div'); h.className = 'k-hint'; h.textContent = hint; d.appendChild(h); }
+  const more = document.createElement('span');
+  more.className = 'k-more';
+  more.textContent = isOpen ? 'Aufschlüsselung schliessen' : 'nach Szenario';
+  const caret = document.createElement('span');
+  caret.className = 'caret';
+  more.appendChild(caret);
+  d.appendChild(more);
+  d.addEventListener('click', () => {
+    STATE.openKpi = isOpen ? null : measure.id;
+    renderAll();
+    if (!isOpen) requestAnimationFrame(() => {
+      const k = $('#kpi-detail');
+      if (k) k.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
   return d;
 }
 
@@ -426,13 +546,7 @@ function renderKpis() {
   const versions = selectedVersions();
   versions.forEach((v) => {
     const ds = v.datasets;
-    const calls = ds.reduce((a, d) => a + (d.runCount || 0), 0);
-    const errW = ds.reduce((a, d) => a + (d.errorRate || 0) * (d.runCount || 0), 0);
-    const lat = ds.reduce((a, d) => a + (d.latencyP50 || 0) * (d.runCount || 0), 0);
-    const cost = ds.reduce((a, d) => a + (d.cost || 0), 0);
-    const tokens = ds.reduce((a, d) => a + (d.tokens || 0), 0);
     const scen = new Set(ds.map((d) => d.scenario));
-
     const block = document.createElement('div');
     block.className = 'kpi-block';
     if (versions.length > 1 || DATA.versions.length > 1) {
@@ -442,17 +556,24 @@ function renderKpis() {
       sw.className = 'swatch';
       sw.style.background = versionColor(v.id);
       head.appendChild(sw);
-      head.appendChild(document.createTextNode(`Version ${v.id}`));
+      head.appendChild(document.createTextNode(v.id));
       block.appendChild(head);
     }
     const row = document.createElement('div');
     row.className = 'kpi-row';
-    row.appendChild(kpiTile('Simulationsanrufe', fmtInt(calls), `${ds.length} Datensätze · ${scen.size} Szenarien`));
-    row.appendChild(kpiTile('Datensätze', fmtInt(ds.length), 'je 100 simulierte Anrufe'));
-    row.appendChild(kpiTile('Metriken', fmtInt(metricsIn(ds).length), 'szenarioabhängig angewendet'));
-    row.appendChild(kpiTile('Fehlerrate', calls ? fmtPct(errW / calls, 1) : '–', 'technische Fehler im Lauf'));
-    row.appendChild(kpiTile('Gesprächsdauer p50', calls ? fmtNum(lat / calls, 1) + ' s' : '–', 'Median je Anruf, über Datensätze gemittelt'));
-    row.appendChild(kpiTile('Modellkosten', fmtNum(cost, 2) + ' $', `${fmtInt(tokens)} Tokens gesamt`));
+    const hints = {
+      calls: `${ds.length} Datensätze · ${scen.size} ${scen.size === 1 ? 'Szenario' : 'Szenarien'}`,
+      datasets: 'je 100 simulierte Anrufe',
+      metrics: 'szenarioabhängig angewendet',
+      errors: 'technische Fehler im Lauf',
+      duration: 'Median je Anruf, über Datensätze gemittelt',
+      cost: `${fmtInt(measureValue('tokens', ds))} Tokens gesamt`,
+    };
+    KPI_MEASURES.forEach((m) => {
+      const chart = m.charts[0];
+      const val = fmtMeasure(chart.fmt, measureValue(chart.field, ds));
+      row.appendChild(kpiTile(m, val, hints[m.id]));
+    });
     block.appendChild(row);
     box.appendChild(block);
   });
@@ -462,6 +583,232 @@ function renderKpis() {
     p.textContent = 'Keine Version ausgewählt.';
     box.appendChild(p);
   }
+}
+
+/* --- Kennzahl-Detail: Aufschlüsselung nach Szenario und Version --------- */
+function scenariosPresent(versions) {
+  return SCENARIOS.filter((sc) => versions.some((v) => datasetsOf(v, sc.id).length));
+}
+
+function renderKpiDetail() {
+  const box = $('#kpi-detail');
+  box.textContent = '';
+  const measure = KPI_MEASURES.find((m) => m.id === STATE.openKpi);
+  if (!measure) return;
+  const versions = selectedVersions();
+  if (!versions.length) return;
+
+  const panel = document.createElement('div');
+  panel.className = 'detail';
+  const head = document.createElement('div');
+  head.className = 'detail-head';
+  const hrow = document.createElement('div');
+  hrow.style.display = 'flex';
+  hrow.style.alignItems = 'flex-start';
+  hrow.style.gap = '14px';
+  const htxt = document.createElement('div');
+  const eyebrow = document.createElement('div');
+  eyebrow.className = 'eyebrow';
+  eyebrow.textContent = 'Kennzahl im Detail';
+  const h3 = document.createElement('h3');
+  h3.textContent = measure.label;
+  const p = document.createElement('p');
+  p.textContent = measure.desc;
+  htxt.appendChild(eyebrow); htxt.appendChild(h3); htxt.appendChild(p);
+  hrow.appendChild(htxt);
+  const close = document.createElement('button');
+  close.className = 'close-x';
+  close.type = 'button';
+  close.setAttribute('aria-label', 'Aufschlüsselung schliessen');
+  close.textContent = '✕';
+  close.addEventListener('click', () => { STATE.openKpi = null; renderAll(); });
+  hrow.appendChild(close);
+  head.appendChild(hrow);
+  panel.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'detail-body';
+  panel.appendChild(body);
+  box.appendChild(panel);
+
+  const scen = scenariosPresent(versions);
+
+  /* Gesamtwerte je Version als Kacheln */
+  const totals = document.createElement('div');
+  totals.className = 'kpi-row';
+  totals.style.marginBottom = '20px';
+  versions.forEach((v) => {
+    const chart = measure.charts[0];
+    const d = document.createElement('div');
+    d.className = 'kpi';
+    const l = document.createElement('div');
+    l.className = 'k-label';
+    const sw = document.createElement('span');
+    sw.className = 'swatch-inline';
+    sw.style.background = versionColor(v.id);
+    l.appendChild(sw);
+    l.appendChild(document.createTextNode(v.id));
+    const val = document.createElement('div');
+    val.className = 'k-value';
+    val.textContent = fmtMeasure(chart.fmt, measureValue(chart.field, v.datasets));
+    const hint = document.createElement('div');
+    hint.className = 'k-hint';
+    hint.textContent = (measure.agg === 'mean' ? 'gewichtetes Mittel' : 'Summe') + ' über alle Szenarien';
+    d.appendChild(l); d.appendChild(val); d.appendChild(hint);
+    totals.appendChild(d);
+  });
+  body.appendChild(totals);
+
+  if (measure.runs) {
+    const status = document.createElement('div');
+    status.id = 'kpi-runs-status';
+    body.appendChild(status);
+  }
+
+  /* Ein Diagramm je Teilkennzahl */
+  measure.charts.forEach((chart, idx) => {
+    const wrapC = document.createElement('div');
+    wrapC.style.marginBottom = '18px';
+    body.appendChild(wrapC);
+    const id = `kpi-${measure.id}-${idx}`;
+    wrapC.appendChild(chartCard({
+      id,
+      title: chart.label,
+      subtitle: chart.hint || (chart.runs
+        ? 'Mittelwert je Anruf, aus den Runs-Dateien berechnet'
+        : 'Werte aus der Summary-Datei'),
+      footnote: `Zeilen sind Szenarien${(chart.agg || measure.agg) === 'mean' ? ', zuletzt der gewichtete Gesamtwert' : ''}. Ein Punkt ist eine Version.`,
+      build: (el2) => buildKpiChart(el2, measure, chart, versions, scen),
+      buildTable: (el2) => buildKpiTable(el2, measure, chart, versions, scen),
+    }));
+  });
+
+  /* Bei der Metriken-Kachel zusätzlich: welche Metrik in welchem Szenario */
+  if (measure.table === 'metrics') {
+    const h = document.createElement('h5');
+    h.className = 'eyebrow';
+    h.style.margin = '4px 0 10px';
+    h.textContent = 'Angewendete Metriken je Szenario';
+    body.appendChild(h);
+    const tbl = document.createElement('div');
+    const cols = [{ label: 'Metrik' }, { label: 'Messverfahren' }];
+    scen.forEach((sc) => cols.push({ label: sc.name }));
+    const allKeys = metricsIn(versions.flatMap((v) => v.datasets));
+    renderTable(tbl, {
+      columns: cols,
+      rows: allKeys.map((k) => {
+        const mi = metricInfo(k);
+        const cells = [mi.name, mi.typ];
+        scen.forEach((sc) => {
+          const ds = versions.flatMap((v) => datasetsOf(v, sc.id));
+          const n = datasetsWithMetric(ds, k).length;
+          cells.push(n ? '✓' : '–');
+        });
+        return { cells };
+      }),
+      caption: 'Angewendete Metriken je Szenario',
+    });
+    body.appendChild(tbl);
+  }
+
+  /* Turn-Kennzahlen brauchen die Runs-Dateien */
+  if (measure.runs) {
+    const targets = versions.flatMap((v) => v.datasets).filter((d) => d.hasRuns && !d.turnStats);
+    const status = $('#kpi-runs-status');
+    if (targets.length) {
+      status.appendChild(loadingBox(`Turn-Kennzahlen werden aus ${targets.length} Runs-Dateien berechnet …`));
+      Promise.all(targets.map((d) => loadRuns(d).catch(() => null))).then(() => {
+        if (STATE.openKpi === measure.id) renderAll();
+      });
+    } else {
+      const missing = versions.flatMap((v) => v.datasets.filter((d) => !d.hasRuns)
+        .map((d) => `${v.id}: ${d.info.name}`));
+      if (missing.length) {
+        const note = document.createElement('div');
+        note.className = 'note';
+        note.textContent = `Ohne Turn-Kennzahlen (keine Runs-Datei im Repository): ${missing.join(' · ')}. `
+          + 'Die Latenz stammt aus der Summary-Datei und ist deshalb überall vorhanden.';
+        status.appendChild(note);
+      }
+    }
+  }
+}
+
+function kpiRows(measure, chart, versions, scen) {
+  const agg = chart.agg || measure.agg;
+  const rows = scen.map((sc) => ({
+    label: sc.name,
+    hint: null,
+    points: versions.map((v) => {
+      const ds = datasetsOf(v, sc.id);
+      const usable = chart.runs ? ds.filter((d) => d.turnStats) : ds;
+      return {
+        version: v.id, color: versionColor(v.id),
+        value: usable.length ? measureValue(chart.field, usable) : null,
+        n: usable.reduce((a, d) => a + (d.runCount || 0), 0) || null,
+        meta: chart.runs && usable.length < ds.length
+          ? `${ds.length - usable.length} Datensätze ohne Runs-Datei` : null,
+      };
+    }),
+  }));
+  if (agg === 'mean' && scen.length > 1) {
+    rows.push({ kind: 'group', label: 'Über alle Szenarien' });
+    rows.push({
+      label: 'Gewichtetes Mittel',
+      hint: 'nach Anzahl Anrufe gewichtet',
+      points: versions.map((v) => {
+        const ds = chart.runs ? v.datasets.filter((d) => d.turnStats) : v.datasets;
+        return {
+          version: v.id, color: versionColor(v.id),
+          value: ds.length ? measureValue(chart.field, ds) : null,
+          n: ds.reduce((a, d) => a + (d.runCount || 0), 0) || null,
+        };
+      }),
+    });
+  }
+  return rows;
+}
+
+function buildKpiChart(container, measure, chart, versions, scen) {
+  const rows = kpiRows(measure, chart, versions, scen);
+  const values = rows.filter((r) => r.points)
+    .flatMap((r) => r.points.map((p) => p.value))
+    .filter((v) => v !== null && v !== undefined && !Number.isNaN(v));
+  const max = values.length ? Math.max(...values) : 1;
+  const nice = niceCeil(max);
+  dotPlot(container, {
+    rows,
+    versions: versions.map((v) => ({ id: v.id, color: versionColor(v.id) })),
+    domain: [0, nice],
+    format: (v) => fmtMeasure(chart.fmt, v),
+    axisFormat: (v) => fmtMeasureAxis(chart.fmt, v, nice),
+    ticks: [0, nice / 4, nice / 2, (nice * 3) / 4, nice],
+    axisLabel: chart.label + (chart.unit ? ` in ${chart.unit}` : ''),
+    ariaLabel: `${chart.label} je Szenario und Version`,
+  });
+}
+
+function buildKpiTable(container, measure, chart, versions, scen) {
+  const rows = kpiRows(measure, chart, versions, scen);
+  const cols = [{ label: 'Szenario' }];
+  versions.forEach((v) => cols.push({ label: v.id, color: versionColor(v.id) }));
+  renderTable(container, {
+    columns: cols,
+    rows: rows.map((r) => {
+      if (r.kind === 'group') return { group: r.label };
+      return { cells: [r.label].concat(r.points.map((p) => fmtMeasure(chart.fmt, p.value))) };
+    }),
+    caption: `${chart.label} je Szenario und Version`,
+  });
+}
+
+/* Runde Obergrenze für die Achse */
+function niceCeil(v) {
+  if (!v || !isFinite(v) || v <= 0) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(v)));
+  const n = v / mag;
+  const step = n <= 1 ? 1 : n <= 1.5 ? 1.5 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10;
+  return step * mag;
 }
 
 /* --- Diagrammkarte mit Diagramm-/Tabellen-Umschalter -------------------- */
@@ -612,9 +959,9 @@ function renderScenarios() {
 
   const grid = document.createElement('div');
   grid.className = 'scenario-grid';
-  // Ab drei Versionen brauchen die Wertespalten so viel Platz, dass zwei
-  // Karten nebeneinander die Beschriftungen abschneiden würden
-  if (versions.length > 2) grid.style.gridTemplateColumns = '1fr';
+  // Im Versionsvergleich beanspruchen die Wertespalten Platz – das Layout
+  // schaltet dann per CSS auf breitere Karten um
+  grid.dataset.multi = versions.length > 1 ? 'true' : 'false';
 
   SCENARIOS.forEach((sc) => {
     const dsAll = versions.flatMap((v) => datasetsOf(v, sc.id));
@@ -767,11 +1114,24 @@ function renderScenarioDetail() {
     const pp = document.createElement('p');
     pp.textContent = d.info.desc;
     c.appendChild(pp);
+    // Fehlende Runs-Dateien je Version ausweisen
+    const ohne = versions.filter((v) => {
+      const dd = v.datasets.find((x) => x.dataset === d.dataset);
+      return dd && !dd.hasRuns;
+    }).map((v) => v.id);
+    if (ohne.length) {
+      const tg = document.createElement('span');
+      tg.className = 'tag pending';
+      tg.textContent = TEXTS.noRunsShort + ': ' + ohne.join(', ');
+      t.appendChild(tg);
+    }
     const meta = document.createElement('p');
     meta.className = 'muted';
     meta.style.fontSize = '11.5px';
     meta.style.color = 'var(--ink-3)';
-    meta.textContent = `Datensatz: ${d.dataset} · ${fmtInt(d.runCount)} Anrufe · Kontaktdaten: ${d.info.kontakt}`;
+    const inV = versions.filter((v) => v.datasets.some((x) => x.dataset === d.dataset)).map((v) => v.id);
+    meta.textContent = `Datensatz: ${d.dataset} · ${fmtInt(d.runCount)} Anrufe · Kontaktdaten: ${d.info.kontakt}`
+      + (versions.length > 1 ? ` · vorhanden in: ${inV.join(', ')}` : '');
     c.appendChild(meta);
     list.appendChild(c);
   });
@@ -793,7 +1153,7 @@ function renderScenarioDetail() {
 
   const grid = document.createElement('div');
   grid.className = 'metric-grid';
-  if (versions.length > 2) grid.style.gridTemplateColumns = '1fr';
+  grid.dataset.multi = versions.length > 1 ? 'true' : 'false';
   keys.forEach((k) => grid.appendChild(metricPanel(sc, k, versions)));
   body.appendChild(grid);
 
@@ -842,23 +1202,30 @@ function metricPanel(sc, metricKey, versions) {
   body.className = 'mp-body';
   panel.appendChild(body);
 
-  const rows = unionDatasets(versions, sc.id).map((d0) => {
-    const points = versions.map((v) => {
+  // Nur Sub-Szenarien, in denen diese Metrik überhaupt erhoben wird
+  const rows = unionDatasets(versions, sc.id)
+    .filter((d0) => versions.some((v) => {
       const d = v.datasets.find((x) => x.dataset === d0.dataset);
-      const s = d && d.scores[metricKey];
+      return d && d.scores[metricKey];
+    }))
+    .map((d0) => {
+      const points = versions.map((v) => {
+        const d = v.datasets.find((x) => x.dataset === d0.dataset);
+        const s = d && d.scores[metricKey];
+        return {
+          version: v.id, color: versionColor(v.id),
+          value: s ? s.avg : null, n: s ? s.n : null,
+          meta: d && !d.hasRuns ? TEXTS.noRunsShort : null,
+        };
+      });
       return {
-        version: v.id, color: versionColor(v.id),
-        value: s ? s.avg : null, n: s ? s.n : null,
+        label: d0.info.name,
+        hint: d0.info.variante === 'Multiinfo' ? 'Multiinfo-Variante' : null,
+        target: mi.direction === 'ziel' ? mi.target : null,
+        decimals: decimalsForMetric(metricKey),
+        points,
       };
     });
-    return {
-      label: d0.info.name,
-      hint: d0.info.variante === 'Multiinfo' ? 'Multiinfo-Variante' : null,
-      target: mi.direction === 'ziel' ? mi.target : null,
-      decimals: decimalsForMetric(metricKey),
-      points,
-    };
-  });
   scheduleDraw(body, () => {
     dotPlot(body, {
       rows,
@@ -944,15 +1311,39 @@ function metricDetail(sc, metricKey, versions) {
   exBox.innerHTML = '<div class="state"><span class="loading"><span class="spinner"></span>Transkripte werden geladen …</span></div>';
   wrap.appendChild(exBox);
 
-  const needed = [];
+  // Datensätze mit dieser Metrik – getrennt nach „Runs-Datei vorhanden“
+  const withMetric = [];
   versions.forEach((v) => datasetsOf(v, sc.id).forEach((d) => {
-    if (d.scores[metricKey]) needed.push(d);
+    if (d.scores[metricKey]) withMetric.push(d);
   }));
+  const needed = withMetric.filter((d) => d.hasRuns);
+  const pending = withMetric.filter((d) => !d.hasRuns);
+
+  const pendingNote = () => {
+    if (!pending.length) return null;
+    const n = document.createElement('div');
+    n.className = 'note';
+    const namen = pending.map((d) => `${d.version} – ${d.info.name}`).join(' · ');
+    n.textContent = `${TEXTS.noRuns} Betroffen: ${namen}.`;
+    return n;
+  };
+
+  if (!needed.length) {
+    distBox.textContent = '';
+    const note = pendingNote();
+    if (note) distBox.appendChild(note);
+    else distBox.appendChild(errorBox('Keine Einzelergebnisse verfügbar.',
+      'Für die betroffenen Datensätze liegt keine Runs-Datei im Repository.'));
+    exBox.textContent = '';
+    const n2 = pendingNote();
+    if (n2) exBox.appendChild(n2);
+    return wrap;
+  }
 
   Promise.all(needed.map((d) => loadRuns(d).then(() => d).catch((e) => ({ error: e, ds: d }))))
     .then(() => {
-      renderDistribution(distBox, needed, metricKey, versions);
-      renderExamples(exBox, sc, needed, metricKey);
+      renderDistribution(distBox, needed, metricKey, versions, pendingNote());
+      renderExamples(exBox, sc, needed, metricKey, pendingNote());
       flushDraws();
     })
     .catch((e) => {
@@ -964,8 +1355,9 @@ function metricDetail(sc, metricKey, versions) {
   return wrap;
 }
 
-function renderDistribution(box, datasets, metricKey, versions) {
+function renderDistribution(box, datasets, metricKey, versions, pendingNote) {
   box.textContent = '';
+  if (pendingNote) box.appendChild(pendingNote);
   const usable = datasets.filter((d) => Array.isArray(d.runs));
   if (!usable.length) {
     box.appendChild(errorBox('Keine Einzelergebnisse verfügbar.',
@@ -974,7 +1366,11 @@ function renderDistribution(box, datasets, metricKey, versions) {
   }
   const mi = metricInfo(metricKey);
   const allValues = usable.flatMap((d) => d.runs.map((r) => r.feedback[metricKey]).filter((x) => x !== null && x !== undefined));
-  const binaer = allValues.every((v) => v === 0 || v === 1);
+  // Die Skala steht im Metrik-Register. Auf die Daten zu schauen wäre falsch:
+  // eine anteilige Metrik kann in einem Szenario zufällig überall 0 sein.
+  const binaer = mi.unbekannt
+    ? allValues.every((v) => v === 0 || v === 1)
+    : isBinaryMetric(metricKey);
 
   const legend = document.createElement('div');
   legend.className = 'chart-legend';
@@ -1098,8 +1494,9 @@ const INPUT_LABEL = {
   Kundennummer: 'Kundennummer', availability: 'Erreichbarkeit', call_intent: 'Anrufgrund',
 };
 
-function renderExamples(box, sc, datasets, metricKey) {
+function renderExamples(box, sc, datasets, metricKey, pendingNote) {
   box.textContent = '';
+  if (pendingNote) box.appendChild(pendingNote);
   const usable = datasets.filter((d) => Array.isArray(d.runs));
   if (!usable.length) return;
   const stateKey = sc.id + '::' + metricKey;
@@ -1123,7 +1520,7 @@ function renderExamples(box, sc, datasets, metricKey) {
   });
   sel.addEventListener('change', () => {
     STATE.exampleDataset[stateKey] = sel.value;
-    renderExamples(box, sc, datasets, metricKey);
+    renderExamples(box, sc, datasets, metricKey, pendingNote);
   });
   lab.appendChild(sel);
   controls.appendChild(lab);
@@ -1175,10 +1572,14 @@ function transcriptCard(pick, metricKey, ds, tag) {
   meta.className = 't-vars';
   meta.style.color = 'var(--ink-3)';
   const others = Object.keys(pick.r.feedback)
-    .filter((k) => k !== metricKey && pick.r.feedback[k] !== null)
+    .filter((k) => k !== metricKey && pick.r.feedback[k] !== null
+      && metricApplies(k, ds.dataset, ds.info))
     .sort((a, b) => (metricInfo(a).order || 999) - (metricInfo(b).order || 999))
     .map((k) => `${metricInfo(k).short} ${fmtRunValue(k, pick.r.feedback[k])}`);
-  meta.textContent = [`Dauer ${fmtNum(pick.r.executionTime, 1)} s`, ...others].join(' · ');
+  const turnInfo = pick.r.totalTurns !== null && pick.r.totalTurns !== undefined
+    ? `${fmtInt(pick.r.totalTurns)} Turns (davon ${fmtInt(pick.r.assistantTurns)} der Assistenz)` : null;
+  meta.textContent = [`Dauer ${fmtNum(pick.r.executionTime, 1)} s`, turnInfo, ...others]
+    .filter(Boolean).join(' · ');
   head.appendChild(meta);
   card.appendChild(head);
 
@@ -1282,9 +1683,12 @@ function renderFooter() {
   box.textContent = '';
   const versions = DATA.versions.map((v) => v.id).join(', ');
   const dsCount = DATA.versions.reduce((a, v) => a + v.datasets.length, 0);
-  const via = DATA.source === 'manifest'
-    ? `Verzeichnis aus manifest.json${DATA.generated ? ` (erzeugt ${new Date(DATA.generated).toLocaleString('de-DE')})` : ''}`
-    : 'Verzeichnis über die GitHub-Contents-API';
+  const stamp = DATA.generated ? ` (erzeugt ${new Date(DATA.generated).toLocaleString('de-DE')})` : '';
+  const via = DATA.source === 'local'
+    ? `lokale Dateien neben dem Dashboard, nicht aus GitHub${stamp} — Entwicklungsmodus „?source=local“`
+    : DATA.source === 'manifest'
+      ? `Verzeichnis aus manifest.json${stamp}`
+      : 'Verzeichnis über die GitHub-Contents-API';
   const lines = [
     `Datenquelle: GitHub-Repository ${CONFIG.owner}/${CONFIG.repo} (Branch ${CONFIG.branch}) · ${via} · gefundene Versionen: ${versions || '–'} · ${dsCount} Datensätze`,
     'Die Ergebnisdateien werden bei jedem Laden direkt aus dem Repository gelesen. Neue Daten oder eine neue Version erscheinen ohne erneutes Deployment des Dashboards.',

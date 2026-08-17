@@ -7,9 +7,13 @@
 /* --- Versionsfarben ------------------------------------------------------
    Validierte kategoriale Palette (dataviz-Checks, all-pairs):
    CVD ΔE 9.5 · Normalsicht ΔE 20.5 · Lightness-Band und Chroma-Floor bestanden.
-   Reihenfolge ist FIX: V1 = Slot 1, V2 = Slot 2, … Farbe folgt der Version,
-   nicht der Auswahlreihenfolge. Ab der 6. Version wird neutrales Grau
-   verwendet (Identität dann ausschliesslich über Label/Legende).            */
+
+   Die Versionsbezeichnung ist der Ordnername im Datenrepository (z. B.
+   „V1 OpenAI“). Die Farbe wird nach der sortierten Reihenfolge der Ordner
+   vergeben: führende Versionsnummer, danach alphabetisch. Neue Ordner mit
+   höherer Nummer kommen hinten dazu, bestehende Versionen behalten damit ihre
+   Farbe. Ab der 6. Version wird neutrales Grau verwendet (Identität dann
+   ausschliesslich über Label und Legende).                                  */
 const VERSION_SLOTS = [
   '#315DFF', // sipgate Blue Key
   '#D14D00', // Orange 10
@@ -19,6 +23,10 @@ const VERSION_SLOTS = [
 ];
 const VERSION_FALLBACK = '#646464';
 const MAX_COMPARE = 5;
+
+/* Feste Farbe für einen bestimmten Ordnernamen erzwingen (optional).
+   Beispiel:  'V1 OpenAI': '#315DFF',                                        */
+const VERSION_COLOR_OVERRIDES = {};
 
 /* --- Metrik-Gruppen ----------------------------------------------------- */
 const METRIC_GROUPS = [
@@ -83,6 +91,17 @@ const METRICS = {
     desc: 'Transparenz-Metrik für die Konfiguration ohne Kalenderanbindung. Die Assistenz darf keine Terminbuchung suggerieren, die sie technisch nicht ausführen kann.',
     order: 13,
   },
+  schedule_appointment: {
+    name: 'Termin erfolgreich gebucht',
+    short: 'Termin gebucht',
+    group: 'aufgabe',
+    typ: 'LLM-as-a-Judge',
+    direction: 'hoch',
+    scale: 'binär (0 / 1) je Anruf, dargestellt als Anteil der Anrufe',
+    frage: 'Hat die Assistenz im Gespräch tatsächlich einen Termin gebucht?',
+    desc: 'Die eigentliche Zielhandlung des Termin-Szenarios. Sie wird nur dort erhoben, wo eine Buchung technisch möglich ist – mit Kalenderanbindung und vollständigen Kontaktdaten (Telefon und E-Mail).',
+    order: 14,
+  },
   all_info_appointment_telonly: {
     name: 'Termindaten vollständig (nur Telefonnummer)',
     short: 'Termindaten vollständig (Tel.)',
@@ -92,7 +111,40 @@ const METRICS = {
     scale: 'binär (0 / 1) je Anruf, dargestellt als Anteil der Anrufe',
     frage: 'Hat die Assistenz alle notwendigen Angaben erhalten (Name, Anrufgrund und Telefonnummer)?',
     desc: 'Vollständigkeit der Datenerhebung im Termin-Szenario, wenn die anrufende Person keine E-Mail-Adresse herausgibt. Die Assistenz muss mit der Telefonnummer als einzigem Kontaktweg auskommen.',
-    order: 14,
+    order: 15,
+  },
+  hallucinate_appointment: {
+    name: 'Terminbuchung fälschlich behauptet',
+    short: 'Buchung halluziniert',
+    group: 'aufgabe',
+    typ: 'LLM-as-a-Judge',
+    direction: 'niedrig',
+    scale: 'binär (0 / 1) je Anruf, dargestellt als Anteil der Anrufe',
+    frage: 'Hat die Assistenz einen Termin als gebucht dargestellt, obwohl sie ihn nicht buchen konnte?',
+    desc: 'Fehlermetrik gegen Halluzinationen: Ein Wert von 1 bedeutet, dass die Assistenz im Anruf eine Terminbuchung behauptet oder suggeriert hat, die technisch nicht stattgefunden hat. Erhoben in den Konfigurationen, in denen keine vollständige Buchung möglich ist. Je niedriger, desto besser.',
+    order: 17,
+  },
+  techsupport_correctness: {
+    name: 'Technische Auskunft korrekt',
+    short: 'Auskunft korrekt',
+    group: 'aufgabe',
+    typ: 'LLM-as-a-Judge',
+    direction: 'hoch',
+    scale: 'binär (0 / 1) je Anruf, dargestellt als Anteil der Anrufe',
+    frage: 'Hat die Assistenz die technische Frage inhaltlich korrekt beantwortet?',
+    desc: 'Kern-Metrik des Support-Szenarios mit beantwortbaren Fragen: Die benötigte Information steht der Assistenz zur Verfügung, sie muss sie korrekt wiedergeben.',
+    order: 18,
+  },
+  techsupport_noinfo_disclosure: {
+    name: 'Fehlendes Wissen offengelegt',
+    short: 'Wissenslücke offengelegt',
+    group: 'aufgabe',
+    typ: 'LLM-as-a-Judge',
+    direction: 'hoch',
+    scale: 'binär (0 / 1) je Anruf, dargestellt als Anteil der Anrufe',
+    frage: 'Hat die Assistenz offengelegt, dass ihr zu dieser Frage keine Information vorliegt?',
+    desc: 'Gegenstück zur korrekten Auskunft: Im Support-Szenario mit nicht beantwortbaren Fragen liegt die Information nicht vor. Erwartet wird, dass die Assistenz die Wissenslücke benennt statt eine Antwort zu erfinden.',
+    order: 19,
   },
   all_info_appointment_telemail: {
     name: 'Termindaten vollständig (Telefon + E-Mail)',
@@ -103,8 +155,11 @@ const METRICS = {
     scale: 'binär (0 / 1) je Anruf, dargestellt als Anteil der Anrufe',
     frage: 'Hat die Assistenz alle notwendigen Angaben erhalten, um einen Termin zu vereinbaren (Name, Anrufgrund, Telefonnummer und E-Mail-Adresse)?',
     desc: 'Vollständigkeit der Datenerhebung im Termin-Szenario, wenn die anrufende Person sowohl Telefonnummer als auch E-Mail-Adresse herausgibt.',
-    hinweis: 'In der Konfiguration ohne Kalenderanbindung wird diese Metrik mitgemessen, obwohl dort gar kein Termin gebucht werden kann. Niedrige Werte sind dort erwartbar und kein Fehler – aussagekräftig ist sie nur in den Konfigurationen mit Kalenderanbindung.',
-    order: 15,
+    // Ohne Kalenderanbindung ist keine Terminbuchung möglich; die Metrik wird
+    // dort zwar mitgeschrieben, aber nicht ausgewertet.
+    excludeIf: (dsName, info) => info.kalender === false,
+    hinweis: 'Konfigurationen ohne Kalenderanbindung sind aus dieser Metrik ausgenommen: dort ist eine Terminbuchung technisch nicht möglich, die Datenerhebung also nicht das Ziel des Gesprächs. Die Werte in den Ergebnisdateien bleiben davon unberührt – sie werden im Dashboard nur nicht mitgerechnet.',
+    order: 16,
   },
   call_reason_identified: {
     name: 'Anrufgrund korrekt erkannt',
@@ -168,6 +223,13 @@ const SCENARIOS = [
     kurz: 'Anrufende möchten ausdrücklich zurückgerufen werden.',
     desc: 'Die simulierte anrufende Person bittet ausdrücklich um einen Rückruf durch Mitarbeitende und lehnt eine Terminbuchung explizit ab. Wird ein Termin als einzige Option angeboten, bricht sie das Gespräch mit dem Hinweis ab, es später erneut zu versuchen. Getestet wird, ob die Assistenz den Rückrufwunsch annimmt und die dafür nötigen Angaben erhebt.',
     match: (ds) => /callback/i.test(ds),
+  },
+  {
+    id: 'techsupport',
+    name: 'Technische Auskunft',
+    kurz: 'Anrufende stellen eine technische Frage.',
+    desc: 'Die simulierte anrufende Person stellt eine technische Frage rund um ihre Wohnung, ihren Vertrag oder die Genossenschaft. Getestet wird die Auskunftsfähigkeit der Assistenz in zwei gegensätzlichen Lagen: einmal liegt die benötigte Information vor, einmal nicht. Entscheidend ist, dass die Assistenz im ersten Fall korrekt antwortet und im zweiten Fall die Wissenslücke offenlegt, statt eine Antwort zu erfinden.',
+    match: (ds) => /techsupport/i.test(ds),
   },
 ];
 
@@ -236,7 +298,86 @@ const DATASETS = {
     desc: 'Die anrufende Person bittet ausdrücklich um einen Rückruf und lehnt eine Terminbuchung ab. Sie nennt Name, Telefonnummer, E-Mail-Adresse, Kundennummer und Erreichbarkeit erst auf Nachfrage.',
     prompt: 'prompts/caller_callback_v2.txt',
   },
+  PREDEPLOY_techsupport_sim_answerable_100: {
+    name: 'Beantwortbare Frage',
+    scenario: 'techsupport',
+    kalender: null,
+    kontakt: 'Telefon + E-Mail + Kundennummer',
+    variante: 'Basis',
+    desc: 'Die anrufende Person stellt eine technische Frage, deren Antwort der Assistenz vorliegt. Erwartet wird eine inhaltlich korrekte Auskunft. Die Gespräche sind kurz – es geht um eine Auskunft, nicht um eine Terminbuchung.',
+  },
+  PREDEPLOY_techsupport_sim_unanswerable_100: {
+    name: 'Nicht beantwortbare Frage',
+    scenario: 'techsupport',
+    kalender: null,
+    kontakt: 'Telefon + E-Mail + Kundennummer',
+    variante: 'Basis',
+    desc: 'Die anrufende Person stellt eine technische Frage, zu der der Assistenz keine Information vorliegt. Erwartet wird, dass die Assistenz die Wissenslücke offenlegt, statt eine plausibel klingende Antwort zu erfinden.',
+  },
 };
+
+/* --- Kennzahlen der Übersicht ------------------------------------------
+   Jede Kachel in „Was in dieser Auswertung steckt“ ist anklickbar und öffnet
+   die Aufschlüsselung nach Szenario und Version.
+     agg     'sum'  → über Szenarien addiert
+             'mean' → nach Anzahl Anrufe gewichtetes Mittel
+     runs    true   → braucht die Runs-Dateien (Werte je Anruf)              */
+const KPI_MEASURES = [
+  {
+    id: 'calls',
+    label: 'Simulationsanrufe',
+    desc: 'Anzahl vollständig simulierter Telefonate. Pro Datensatz sind es 100 Anrufe; die Summe hängt davon ab, wie viele Datensätze für eine Version vorliegen.',
+    agg: 'sum',
+    charts: [{ label: 'Anrufe', unit: '', fmt: 'int', field: 'calls' }],
+  },
+  {
+    id: 'datasets',
+    label: 'Datensätze',
+    desc: 'Anzahl ausgewerteter Datensätze (Sub-Szenarien) je Szenario. Unterschiede zwischen Versionen zeigen, welche Läufe noch fehlen.',
+    agg: 'sum',
+    charts: [{ label: 'Datensätze', unit: '', fmt: 'int', field: 'datasets' }],
+  },
+  {
+    id: 'metrics',
+    label: 'Metriken',
+    desc: 'Welche Metriken im jeweiligen Szenario angewendet wurden. Metriken werden nur dort erhoben, wo sie inhaltlich sinnvoll sind.',
+    agg: 'sum',
+    table: 'metrics',
+    charts: [{ label: 'Angewendete Metriken', unit: '', fmt: 'int', field: 'metrics' }],
+  },
+  {
+    id: 'errors',
+    label: 'Fehlerrate',
+    desc: 'Anteil der Läufe mit technischem Fehler (Abbruch, Zeitüberschreitung, Fehlermeldung). Inhaltliche Fehler der Assistenz zählen hier nicht – die stehen in den Metriken.',
+    agg: 'mean',
+    charts: [{ label: 'Fehlerrate', unit: '%', fmt: 'pct', field: 'errorRate' }],
+  },
+  {
+    id: 'duration',
+    label: 'Gesprächsdauer p50',
+    desc: 'Dauer und Länge der Gespräche. Die Latenz stammt aus der Summary-Datei, die Turn-Kennzahlen werden aus den Einzelanrufen der Runs-Dateien berechnet. Ein Turn ist ein Gesprächsbeitrag; die Assistenz-Turns sind die Beiträge der Assistenz, die Gesamt-Turns umfassen beide Seiten.',
+    agg: 'mean',
+    runs: true,
+    charts: [
+      { label: 'Latenz p50 je Anruf', unit: 's', fmt: 'sec', field: 'latencyP50', hint: 'Median der Anrufdauer laut Summary-Datei' },
+      { label: 'Assistenz-Turns je Anruf (Ø)', unit: '', fmt: 'num1', field: 'assistantTurns', runs: true },
+      { label: 'Turns gesamt je Anruf (Ø)', unit: '', fmt: 'num1', field: 'totalTurns', runs: true },
+      { label: 'Turn-Dauer (Ø)', unit: 's', fmt: 'sec2', field: 'avgTurnDuration', runs: true },
+    ],
+  },
+  {
+    id: 'cost',
+    label: 'Modellkosten',
+    desc: 'Kosten und Token-Verbrauch der Läufe. Die Kosten je Anruf machen Szenarien unterschiedlicher Größe vergleichbar.',
+    agg: 'sum',
+    charts: [
+      { label: 'Kosten gesamt', unit: '$', fmt: 'usd', field: 'cost' },
+      { label: 'Kosten je Anruf', unit: '$', fmt: 'usd4', field: 'costPerCall', agg: 'mean' },
+      { label: 'Tokens gesamt', unit: '', fmt: 'int', field: 'tokens' },
+      { label: 'Tokens je Anruf', unit: '', fmt: 'int', field: 'tokensPerCall', agg: 'mean' },
+    ],
+  },
+];
 
 /* --- Erklärtexte -------------------------------------------------------- */
 const TEXTS = {
@@ -262,7 +403,8 @@ const TEXTS = {
       titel: 'Aufbau der Experimente',
       body: `<p>Jedes Experiment ist ein LangSmith-Lauf über einen Datensatz mit 100 Beispielen. Getestet wird die <strong>deployte Assistenz</strong> gegen die simulierte anrufende Person – ein vollständiges Telefonat pro Beispiel, protokolliert als Gesprächsverlauf (Trajektorie).</p>
       <p>Ein Datensatz entspricht einer <strong>Kombination aus Szenario und Agenten-Konfiguration</strong>. Die Konfiguration steuert unter anderem, ob eine <strong>Kalenderanbindung</strong> aktiv ist: ohne sie kann die Assistenz keine Termine buchen und muss auf einen Rückruf ausweichen.</p>
-      <p>Anschliessend wird jeder Anruf bewertet – teils durch <strong>LLM-as-a-Judge</strong>-Metriken, teils <strong>regelbasiert</strong>. Angewendet werden nur die Metriken, die im jeweiligen Szenario sinnvoll sind; deshalb ist nicht jede Metrik für jeden Datensatz vorhanden.</p>`,
+      <p>Anschliessend wird jeder Anruf bewertet – teils durch <strong>LLM-as-a-Judge</strong>-Metriken, teils <strong>regelbasiert</strong>. Angewendet werden nur die Metriken, die im jeweiligen Szenario sinnvoll sind; deshalb ist nicht jede Metrik für jeden Datensatz vorhanden.</p>
+      <p>Eine <strong>Version</strong> ist ein solcher Testlauf über alle Szenarien – benannt nach dem Ordner im Datenrepository, zum Beispiel nach dem eingesetzten Sprachmodell. Über die Filterzeile lassen sich mehrere Versionen gleichzeitig auswählen und damit direkt vergleichen.</p>`,
     },
     {
       id: 'metriktypen',
@@ -274,6 +416,9 @@ const TEXTS = {
   ],
   multiinfo: 'Multiinfo-Variante: Die simulierte anrufende Person nennt bereits im ersten, skriptgesteuerten Beitrag zwei Angaben gleichzeitig statt nur einer. So lässt sich prüfen, ob die Assistenz beide Angaben von Anfang an registriert – oder nur eine und später erneut nach der bereits genannten Angabe fragt (Info-Duplikat).',
   aggHinweis: 'Aggregiert über alle Datensätze, in denen die Metrik erhoben wurde – gewichtet nach der Anzahl Anrufe.',
+  kpiHinweis: 'Kachel anklicken für die Aufschlüsselung nach Szenario und Version.',
+  noRuns: 'Für diese Datensätze liegen noch keine Runs-Dateien im Datenrepository. Die aggregierten Werte stammen aus der Summary-Datei; Verteilungen, Turn-Kennzahlen und Beispielgespräche erscheinen automatisch, sobald die Einzelergebnisse nachgeliefert werden.',
+  noRunsShort: 'Einzelergebnisse fehlen noch',
 };
 
 /* --- Zugriffshelfer mit Fallback für künftige Metriken/Datensätze ------- */
@@ -302,10 +447,18 @@ function datasetInfo(dsName) {
     : /telonly/.test(dsName) ? 'nur Telefon' : 'unbekannt';
   const sc = SCENARIOS.find((s) => s.match(dsName));
   const teile = [];
-  if (cal === true) teile.push('Mit Kalender');
-  else if (cal === false) teile.push('Ohne Kalender');
-  if (kontakt !== 'unbekannt') teile.push(kontakt);
-  teile.push(multi ? 'Multiinfo' : 'Basis');
+  if (/techsupport/i.test(dsName)) {
+    if (/unanswerable/i.test(dsName)) teile.push('Nicht beantwortbare Frage');
+    else if (/answerable/i.test(dsName)) teile.push('Beantwortbare Frage');
+  }
+  if (!teile.length) {
+    if (cal === true) teile.push('Mit Kalender');
+    else if (cal === false) teile.push('Ohne Kalender');
+    if (kontakt !== 'unbekannt') teile.push(kontakt);
+    teile.push(multi ? 'Multiinfo' : 'Basis');
+  } else if (multi) {
+    teile.push('Multiinfo');
+  }
   return {
     name: teile.join(' · ') || dsName,
     scenario: sc ? sc.id : 'termin',
@@ -317,11 +470,23 @@ function datasetInfo(dsName) {
   };
 }
 
-function versionColor(version) {
-  const m = /^[Vv](\d+)/.exec(version);
-  const idx = m ? parseInt(m[1], 10) - 1 : -1;
-  if (idx >= 0 && idx < VERSION_SLOTS.length) return VERSION_SLOTS[idx];
-  return VERSION_FALLBACK;
+/* Gilt die Metrik für diesen Datensatz? Manche Metriken werden mitgeschrieben,
+   sind aber in bestimmten Konfigurationen inhaltlich nicht auswertbar.       */
+function metricApplies(metricKey, dsName, info) {
+  const mi = METRICS[metricKey];
+  if (!mi || typeof mi.excludeIf !== 'function') return true;
+  return !mi.excludeIf(dsName, info || datasetInfo(dsName));
+}
+
+/* Sortierschlüssel für Versionsordner: führende Nummer, dann Name. Damit
+   behalten bestehende Versionen ihre Position – und ihre Farbe.             */
+function versionSortKey(name) {
+  const m = /^\s*[Vv]?(\d+)/.exec(name);
+  return [m ? parseInt(m[1], 10) : 1e6, String(name).toLocaleLowerCase('de')];
+}
+function compareVersions(a, b) {
+  const ka = versionSortKey(a), kb = versionSortKey(b);
+  return ka[0] - kb[0] || ka[1].localeCompare(kb[1], 'de');
 }
 
 const DIRECTION_GLYPH = { hoch: '↑', niedrig: '↓', ziel: '◎' };

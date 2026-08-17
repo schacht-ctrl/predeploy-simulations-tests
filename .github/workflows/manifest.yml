@@ -7,9 +7,10 @@ name: manifest aktualisieren
 on:
   push:
     branches: [main]
-    paths:
-      - 'V*/**'
-      - 'scripts/build_manifest.py'
+    # Datenordner heissen frei (z. B. „V1 OpenAI“), deshalb kein Pfadmuster:
+    # jeder Push ausser dem eigenen Manifest-Commit löst den Lauf aus.
+    paths-ignore:
+      - 'manifest.json'
   workflow_dispatch:
 
 permissions:

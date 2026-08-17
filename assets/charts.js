@@ -215,14 +215,46 @@ function dotPlot(container, spec) {
   const {
     rows = [], versions = [], decimalsFor = () => 0,
     axisLabel = 'Anteil der Anrufe',
+    domain = [0, 1],
+    // Standard: Anteile als Prozent. Andere Einheiten übergeben eigenen Formatter.
+    format = null,
+    axisFormat = null,
+    ticks = null,
   } = spec;
+  const [dLo, dHi] = domain;
+  const span = dHi - dLo || 1;
+  const tickVals = ticks || [0, 0.25, 0.5, 0.75, 1].map((t) => dLo + t * span);
+  // row ist null bei Achsenbeschriftungen
+  const fmtVal = format || ((v, row) => fmtPct(v, row ? decimalsFor(row) : 0));
+  const fmtAxis = axisFormat || ((v) => fmtVal(v, null));
   container.textContent = '';
-  const W = innerWidth(container, 300);
 
+  // Legende: ab zwei Serien immer vorhanden, mit vollständigen Namen
+  if (versions.length > 1) {
+    const leg = document.createElement('div');
+    leg.className = 'chart-legend';
+    versions.forEach((v) => {
+      const item = document.createElement('span');
+      item.className = 'legend-item';
+      const dot = document.createElement('span');
+      dot.className = 'legend-dot';
+      dot.style.background = v.color;
+      item.appendChild(dot);
+      item.appendChild(document.createTextNode(v.id));
+      leg.appendChild(item);
+    });
+    container.appendChild(leg);
+  }
+
+  const W = innerWidth(container, 300);
   const FONT_LABEL_M = '600 13px system-ui, -apple-system, Helvetica, Arial, sans-serif';
   const FONT_HINT_M = '400 11px system-ui, -apple-system, Helvetica, Arial, sans-serif';
 
-  const colW = Math.max(52, Math.min(72, 58));
+  // Spaltenbreite aus den gemessenen Versionsnamen (können lang sein, z. B.
+  // „V1 SipgateAI“) – gedeckelt, damit die Zeilenbeschriftung Platz behält.
+  const FONT_COL_M = '700 11px system-ui, -apple-system, Helvetica, Arial, sans-serif';
+  const widestName = versions.reduce((a, v) => Math.max(a, measure(v.id, FONT_COL_M)), 0);
+  const colW = Math.round(Math.max(52, Math.min(116, widestName + 22)));
   const valW = versions.length * colW;
   let labelW = Math.round(Math.min(300, Math.max(132, W * 0.31)));
   const gap = 12;
@@ -256,31 +288,55 @@ function dotPlot(container, spec) {
     viewBox: `0 0 ${W} ${H}`, width: W, height: H, class: 'viz',
     role: 'img', 'aria-label': spec.ariaLabel || 'Punktdiagramm',
   });
-  const sx = (v) => x0 + Math.max(0, Math.min(1, v)) * plotW;
+  const sx = (v) => x0 + Math.max(0, Math.min(1, (v - dLo) / span)) * plotW;
 
-  // Raster: durchgezogene Haarlinien
-  [0, 0.25, 0.5, 0.75, 1].forEach((t) => {
+  // Raster: durchgezogene Haarlinien. Beschriftungen nur, wenn sie nicht
+  // kollidieren – erste und letzte Marke behalten immer ihr Label.
+  const FONT_TICK_M = '400 11px system-ui, -apple-system, Helvetica, Arial, sans-serif';
+  const lastIdx = tickVals.length - 1;
+  const tickLabels = tickVals.map((tv) => fmtAxis(tv));
+  const lastW = measure(tickLabels[lastIdx], FONT_TICK_M);
+  let usedUntil = -Infinity;
+  tickVals.forEach((tv, i) => {
+    const last = i === lastIdx;
     svg.appendChild(el('line', {
-      x1: sx(t), x2: sx(t), y1: headH, y2: headH + plotH,
-      stroke: t === 0 ? C.line2 : C.line, 'stroke-width': 1,
+      x1: sx(tv), x2: sx(tv), y1: headH, y2: headH + plotH,
+      stroke: i === 0 ? C.line2 : C.line, 'stroke-width': 1,
     }));
+    const label = tickLabels[i];
+    const w = measure(label, FONT_TICK_M);
+    const anchor = last ? 'end' : i === 0 ? 'start' : 'middle';
+    const left = last ? sx(tv) - w : i === 0 ? sx(tv) : sx(tv) - w / 2;
+    const right = left + w;
+    const collidesLast = !last && right + 6 > sx(tickVals[lastIdx]) - lastW;
+    if (left < usedUntil + 6 || collidesLast) return;   // Label auslassen
+    usedUntil = right;
     svg.appendChild(el('text', {
-      x: sx(t), y: H - axisH + 18, 'text-anchor': t === 1 ? 'end' : t === 0 ? 'start' : 'middle',
+      x: sx(tv), y: H - axisH + 18, 'text-anchor': anchor,
       fill: C.ink3, 'font-size': 11, 'font-family': 'inherit',
-    }, t === 0 ? '0 %' : Math.round(t * 100) + ' %'));
+    }, label));
   });
   svg.appendChild(el('text', {
     x: x0, y: H - axisH + 33, fill: C.ink3, 'font-size': 10.5, 'font-family': 'inherit',
   }, axisLabel));
 
-  // Kopfzeile der Wertespalten (Legende der Versionen)
+  // Kopfzeile der Wertespalten. Namen werden auf die Spaltenbreite gekürzt –
+  // die vollständige Identität steht in der HTML-Legende über dem Diagramm.
   versions.forEach((v, i) => {
     const cx = x1 + 8 + i * colW + colW - 6;
-    svg.appendChild(el('circle', { cx: cx - measure(v.id, FONT_HINT_M) - 9, cy: 12, r: 4, fill: v.color }));
-    svg.appendChild(el('text', {
+    const maxTextW = colW - 20;
+    let label = v.id;
+    if (measure(label, FONT_COL_M) > maxTextW) {
+      while (label.length > 1 && measure(label + '…', FONT_COL_M) > maxTextW) label = label.slice(0, -1);
+      label = label.replace(/[\s·,;:.]+$/, '') + '…';
+    }
+    svg.appendChild(el('circle', { cx: cx - measure(label, FONT_COL_M) - 8, cy: 12, r: 4, fill: v.color }));
+    const t = el('text', {
       x: cx, y: 16, 'text-anchor': 'end', fill: C.ink2,
       'font-size': 11, 'font-weight': 700, 'font-family': 'inherit',
-    }, v.id));
+    }, label);
+    t.appendChild(el('title', {}, v.id));
+    svg.appendChild(t);
   });
 
   layout.forEach((L) => {
@@ -355,11 +411,11 @@ function dotPlot(container, spec) {
       const hit = el('circle', {
         cx: cxp, cy: cyp, r: 14, fill: 'transparent',
         tabindex: '0', role: 'img',
-        'aria-label': `${row.label}, ${p.version}: ${fmtPct(p.value, decimalsFor(row))}${p.n ? ', n = ' + fmtInt(p.n) : ''}`,
+        'aria-label': `${row.label}, ${p.version}: ${fmtVal(p.value, row)}${p.n ? ', n = ' + fmtInt(p.n) : ''}`,
       });
       hit.style.cursor = 'pointer';
       attachHover(hit, dot, {
-        value: fmtPct(p.value, decimalsFor(row)),
+        value: fmtVal(p.value, row),
         rows: [{ color: p.color, label: `${p.version} · ${row.label}` }],
         meta: [p.n ? `${fmtInt(p.n)} Anrufe` : null, p.meta || null].filter(Boolean).join(' · ') || null,
       });
@@ -373,7 +429,7 @@ function dotPlot(container, spec) {
       const p = row.points.find((q) => q.version === v.id);
       const cxv = x1 + 8 + i * colW + colW - 6;
       const txt = p && p.value !== null && p.value !== undefined && !Number.isNaN(p.value)
-        ? fmtPct(p.value, decimalsFor(row)) : '–';
+        ? fmtVal(p.value, row) : '–';
       svg.appendChild(el('text', {
         x: cxv, y: cy + 4.5, 'text-anchor': 'end',
         fill: txt === '–' ? C.line3 : C.ink, 'font-size': 12.5, 'font-weight': 700,
