@@ -1131,6 +1131,7 @@ function renderScenarioDetail() {
     meta.style.color = 'var(--ink-3)';
     const inV = versions.filter((v) => v.datasets.some((x) => x.dataset === d.dataset)).map((v) => v.id);
     meta.textContent = `Datensatz: ${d.dataset} · ${fmtInt(d.runCount)} Anrufe · Kontaktdaten: ${d.info.kontakt}`
+      + (d.info.prompt ? ` · Rollen-Prompt: ${d.info.prompt.replace(/^prompts\//, '')}` : '')
       + (versions.length > 1 ? ` · vorhanden in: ${inV.join(', ')}` : '');
     c.appendChild(meta);
     list.appendChild(c);
